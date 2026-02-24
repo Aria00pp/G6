@@ -1,7 +1,12 @@
 (defun c:G6 ( / pt angList idx done lenStr len gr key nextpt
                 prevPt2 lastLen finishedInput segStack segRec
                 scaleFactor oldOsmode oldCmdecho *error* dimOff
-                userLen segList userVal e)
+                userLen segList userVal e
+                doShorten threshold capLen eligibleEnts tmpSegList tmpRec
+                sel chosenEnts i entSel chosenEntsOrdered orderedSegs
+                curRec seekSeg oldEnd capDraw liveP1 liveP2 liveAng newEnd delta
+                adjMap moveSegs moveRec moveEnt moveEd moveP1 moveP2 newP1 newP2
+                ed p1 p2 mid ang nAng dimPt)
 
   ;;------------------------------------------------------------
   ;; Error handler: restore system variables
@@ -28,6 +33,97 @@
   ;;------------------------------------------------------------
   (defun deg->rad (d) (* pi (/ d 180.0)))
   (defun rad->deg (r) (* 180.0 (/ r pi)))
+  (defun pt+ (a b) (mapcar '+ a b))
+  (defun pt- (a b) (mapcar '- a b))
+  (defun rec-set (rec key val)
+    (if (assoc key rec)
+      (subst (cons key val) (assoc key rec) rec)
+      (cons (cons key val) rec)
+    )
+  )
+  (defun update-seg-in-stack (stack ent newRec / cur)
+    (if stack
+      (progn
+        (setq cur (car stack))
+        (if (= (cdr (assoc 'lineEnt cur)) ent)
+          (cons newRec (cdr stack))
+          (cons cur (update-seg-in-stack (cdr stack) ent newRec))
+        )
+      )
+      nil
+    )
+  )
+  (defun refresh-seg-endpoints (stack / cur ent ed p1 p2)
+    (if stack
+      (progn
+        (setq cur (car stack)
+              ent (cdr (assoc 'lineEnt cur))
+              ed  (and ent (entget ent))
+              p1  (and ed (cdr (assoc 10 ed)))
+              p2  (and ed (cdr (assoc 11 ed)))
+        )
+        (if (and p1 p2)
+          (setq cur (rec-set (rec-set cur 'p1 p1) 'p2 p2))
+        )
+        (cons cur (refresh-seg-endpoints (cdr stack)))
+      )
+      nil
+    )
+  )
+  (defun add-adj (adj key rec / pair)
+    (setq pair (assoc key adj))
+    (if pair
+      (subst (cons key (cons rec (cdr pair))) pair adj)
+      (cons (cons key (list rec)) adj)
+    )
+  )
+  (defun build-adj-map (stack / adj cur p1)
+    (setq adj '())
+    (while stack
+      (setq cur (car stack)
+            p1  (cdr (assoc 'p1 cur))
+      )
+      (if p1 (setq adj (add-adj adj p1 cur)))
+      (setq stack (cdr stack))
+    )
+    adj
+  )
+  (defun downstream-segs (adj startPt / queue seenPts seenEnts out node pair rec recs ent p2)
+    (setq queue   (list startPt)
+          seenPts '()
+          seenEnts '()
+          out     '()
+    )
+    (while queue
+      (setq node  (car queue)
+            queue (cdr queue)
+      )
+      (if (not (member node seenPts))
+        (progn
+          (setq seenPts (cons node seenPts)
+                pair    (assoc node adj)
+                recs    (if pair (cdr pair) nil)
+          )
+          (while recs
+            (setq rec  (car recs)
+                  recs (cdr recs)
+                  ent  (cdr (assoc 'lineEnt rec))
+            )
+            (if (not (member ent seenEnts))
+              (progn
+                (setq seenEnts (cons ent seenEnts)
+                      out      (cons rec out)
+                      p2       (cdr (assoc 'p2 rec))
+                )
+                (if p2 (setq queue (append queue (list p2))))
+              )
+            )
+          )
+        )
+      )
+    )
+    out
+  )
 
   ;; allowed angles: 30, 90, 150, -150, -90, -30
   (setq angList (mapcar 'deg->rad '(30 90 150 -150 -90 -30)))
@@ -242,6 +338,141 @@
       ;; After drawing: restore OSNAP first, then manage dimensions
       ;;--------------------------------------------------------
       (setvar "OSMODE" oldOsmode)
+
+      ;; Optional shortening of long lines (this run only)
+      (if segStack
+        (progn
+          (initget "Yes No")
+          (setq doShorten (getkword "\nShorten long lines? [Yes/No] <No>: "))
+          (if (= doShorten "Yes")
+            (progn
+              (setq threshold (getreal "\nThreshold <150>: "))
+              (if (null threshold) (setq threshold 150.0))
+              (setq capLen (getreal "\nCap length <150>: "))
+              (if (null capLen) (setq capLen 150.0))
+
+              (setq segStack (refresh-seg-endpoints segStack))
+              (setq eligibleEnts '()
+                    tmpSegList   segStack
+              )
+              (while tmpSegList
+                (setq tmpRec    (car tmpSegList)
+                      tmpSegList (cdr tmpSegList)
+                )
+                (if (> (cdr (assoc 'userLen tmpRec)) threshold)
+                  (setq eligibleEnts (cons (cdr (assoc 'lineEnt tmpRec)) eligibleEnts))
+                )
+              )
+
+              (if eligibleEnts
+                (progn
+                  (prompt "\nSelect eligible LINE objects to shorten.")
+                  (setq sel (ssget '((0 . "LINE"))))
+                  (setq chosenEnts '())
+                  (if sel
+                    (progn
+                      (setq i 0)
+                      (while (< i (sslength sel))
+                        (setq entSel (ssname sel i)
+                              i      (1+ i)
+                        )
+                        (if (and (member entSel eligibleEnts)
+                                 (not (member entSel chosenEnts))
+                            )
+                          (setq chosenEnts (cons entSel chosenEnts))
+                        )
+                      )
+                    )
+                  )
+
+                  (if chosenEnts
+                    (progn
+                      (setq chosenEntsOrdered '()
+                            orderedSegs      (reverse segStack)
+                      )
+                      (while orderedSegs
+                        (setq tmpRec      (car orderedSegs)
+                              orderedSegs (cdr orderedSegs)
+                              entSel      (cdr (assoc 'lineEnt tmpRec))
+                        )
+                        (if (member entSel chosenEnts)
+                          (setq chosenEntsOrdered (cons entSel chosenEntsOrdered))
+                        )
+                      )
+                      (setq chosenEntsOrdered (reverse chosenEntsOrdered))
+
+                      (while chosenEntsOrdered
+                        (setq entSel (car chosenEntsOrdered)
+                              chosenEntsOrdered (cdr chosenEntsOrdered)
+                        )
+
+                        (setq segStack (refresh-seg-endpoints segStack))
+                        (setq curRec  nil
+                              seekSeg segStack
+                        )
+                        (while seekSeg
+                          (if (= (cdr (assoc 'lineEnt (car seekSeg))) entSel)
+                            (setq curRec (car seekSeg)
+                                  seekSeg nil
+                            )
+                            (setq seekSeg (cdr seekSeg))
+                          )
+                        )
+
+                        (if curRec
+                          (progn
+                            (setq ed        (entget entSel)
+                                  liveP1    (cdr (assoc 10 ed))
+                                  liveP2    (cdr (assoc 11 ed))
+                                  oldEnd    liveP2
+                                  capDraw   (* capLen scaleFactor)
+                                  liveAng   (angle liveP1 liveP2)
+                                  newEnd    (polar liveP1 liveAng capDraw)
+                                  delta     (pt- newEnd oldEnd)
+                            )
+
+                            (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
+                            (entmod ed)
+                            (entupd entSel)
+
+                            (setq curRec (rec-set curRec 'p2 newEnd))
+                            (setq curRec (rec-set curRec 'drawLen capDraw))
+                            (setq curRec (rec-set curRec 'shortened T))
+                            (setq segStack (update-seg-in-stack segStack entSel curRec))
+
+                            (setq segStack (refresh-seg-endpoints segStack))
+                            (setq adjMap   (build-adj-map segStack))
+                            (setq moveSegs (downstream-segs adjMap oldEnd))
+
+                            (while moveSegs
+                              (setq moveRec  (car moveSegs)
+                                    moveSegs (cdr moveSegs)
+                                    moveEnt  (cdr (assoc 'lineEnt moveRec))
+                                    moveEd   (entget moveEnt)
+                                    moveP1   (cdr (assoc 10 moveEd))
+                                    moveP2   (cdr (assoc 11 moveEd))
+                                    newP1    (pt+ moveP1 delta)
+                                    newP2    (pt+ moveP2 delta)
+                              )
+                              (setq moveEd (subst (cons 10 newP1) (assoc 10 moveEd) moveEd))
+                              (setq moveEd (subst (cons 11 newP2) (assoc 11 moveEd) moveEd))
+                              (entmod moveEd)
+                              (entupd moveEnt)
+                              (setq moveRec (rec-set moveRec 'p1 newP1))
+                              (setq moveRec (rec-set moveRec 'p2 newP2))
+                              (setq segStack (update-seg-in-stack segStack moveEnt moveRec))
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
 
       ;; Ask for dimension offset and create aligned dimensions
       (if segStack

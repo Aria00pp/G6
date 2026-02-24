@@ -1,7 +1,10 @@
 (defun c:G6 ( / pt angList idx done lenStr len gr key nextpt
                 prevPt2 lastLen finishedInput segStack
                 scaleFactor oldOsmode oldCmdecho *error* dimOff
-                userLen userVal seg segList e ed p1 p2 mid ang nAng dimPt)
+                userLen userVal seg segList e ed p1 p2 mid ang nAng dimPt
+                shortAns ss i se cumDelta newSegs oldEnd newEnd delta
+                targetLen drawTarget midS bMid1 bMid2 b1s b1e b2s b2e
+                breakEnts beList be userLenStr dimStr)
 
   ;;------------------------------------------------------------
   ;; Error handler: restore system variables
@@ -15,6 +18,96 @@
       (princ (strcat "\nError: " msg))
     )
     (princ)
+  )
+
+  ;;------------------------------------------------------------
+  ;; helpers
+  ;;------------------------------------------------------------
+  (defun rm-nil (lst / out)
+    (setq out '())
+    (while lst
+      (if (car lst)
+        (setq out (cons (car lst) out))
+      )
+      (setq lst (cdr lst))
+    )
+    (reverse out)
+  )
+
+  (defun nonzero-delta-p (d / tol)
+    (setq tol 1e-9)
+    (if (and d
+             (or (> (abs (car d)) tol)
+                 (> (abs (cadr d)) tol)
+                 (> (abs (caddr d)) tol)
+             )
+        )
+      T
+      nil
+    )
+  )
+
+  (defun v+ (a b)
+    (list (+ (car a) (car b)) (+ (cadr a) (cadr b)) (+ (caddr a) (caddr b)))
+  )
+
+  (defun v- (a b)
+    (list (- (car a) (car b)) (- (cadr a) (cadr b)) (- (caddr a) (caddr b)))
+  )
+
+  (defun move-line-by-delta (ent d / ed p10 p11)
+    (if (and ent (nonzero-delta-p d))
+      (progn
+        (setq ed (entget ent)
+              p10 (and ed (assoc 10 ed))
+              p11 (and ed (assoc 11 ed))
+        )
+        (if (and ed p10 p11)
+          (progn
+            (setq ed (subst (cons 10 (v+ (cdr p10) d)) p10 ed))
+            (setq ed (subst (cons 11 (v+ (cdr p11) d)) p11 ed))
+            (entmod ed)
+            (entupd ent)
+          )
+        )
+      )
+    )
+  )
+
+  (defun ent-in-ss-p (ent ss / j found)
+    (setq j 0
+          found nil
+    )
+    (if (and ent ss)
+      (while (and (< j (sslength ss)) (not found))
+        (if (= ent (ssname ss j))
+          (setq found T)
+        )
+        (setq j (1+ j))
+      )
+    )
+    found
+  )
+
+  (defun seg-set (s k v / out pr done)
+    (setq out '()
+          done nil
+    )
+    (while s
+      (setq pr (car s))
+      (if (= (car pr) k)
+        (progn
+          (setq out (cons (cons k v) out))
+          (setq done T)
+        )
+        (setq out (cons pr out))
+      )
+      (setq s (cdr s))
+    )
+    (if (not done)
+      (setq out (cons (cons k v) out))
+    )
+    (reverse out)
   )
 
   ;; Save current system variables (OSNAP ON at this point)
@@ -125,6 +218,7 @@
                     ;; compute user length and scaled length
                     (setq userLen (abs (atof lenStr)))                 ;; raw user input
                     (setq len     (* scaleFactor userLen))             ;; scaled & positive
+                    (setq userLenStr lenStr)
 
                     (if prevPt2 (grdraw pt prevPt2 0))
                     (setq prevPt2 nil)
@@ -142,6 +236,9 @@
                           (cons 'lineEnt (entlast))
                           (cons 'drawLen len)
                           (cons 'userLen userLen)
+                          (cons 'userLenStr userLenStr)
+                          (cons 'shortened nil)
+                          (cons 'breakEnts nil)
                           (cons 'dimEnt nil)
                         )
                         segStack
@@ -244,9 +341,103 @@
       )
 
       ;;--------------------------------------------------------
-      ;; After drawing: restore OSNAP first, then manage dimensions
+      ;; After drawing: restore OSNAP first, then optional shorten + dimensions
       ;;--------------------------------------------------------
       (setvar "OSMODE" oldOsmode)
+
+      (setq shortAns (getkword "\nShorten selected long lines to 150? [Yes/No] <No>: "))
+      (if (= shortAns "Yes")
+        (progn
+          (setq ss (ssget '((0 . "LINE"))))
+          (if (and ss segStack)
+            (progn
+              (setq segList (reverse segStack)
+                    cumDelta '(0.0 0.0 0.0)
+                    newSegs '()
+                    targetLen 150.0
+                    drawTarget (* targetLen scaleFactor)
+              )
+              (while segList
+                (setq seg     (car segList)
+                      segList (cdr segList)
+                )
+
+                ;; move this segment (and markers) by accumulated delta
+                (if (nonzero-delta-p cumDelta)
+                  (progn
+                    (move-line-by-delta (cdr (assoc 'lineEnt seg)) cumDelta)
+                    (setq beList (cdr (assoc 'breakEnts seg)))
+                    (while beList
+                      (setq be (car beList))
+                      (move-line-by-delta be cumDelta)
+                      (setq beList (cdr beList))
+                    )
+                    (setq seg (seg-set seg 'p1 (v+ (cdr (assoc 'p1 seg)) cumDelta)))
+                    (setq seg (seg-set seg 'p2 (v+ (cdr (assoc 'p2 seg)) cumDelta)))
+                  )
+                )
+
+                ;; shorten only selected lines from this command with userLen > 150
+                (if (and (ent-in-ss-p (cdr (assoc 'lineEnt seg)) ss)
+                         (> (cdr (assoc 'userLen seg)) 150.0)
+                    )
+                  (progn
+                    (setq e  (cdr (assoc 'lineEnt seg))
+                          ed (and e (entget e))
+                          p1 (and ed (cdr (assoc 10 ed)))
+                          p2 (and ed (cdr (assoc 11 ed)))
+                    )
+                    (if (and p1 p2)
+                      (progn
+                        (setq oldEnd p2
+                              ang    (angle p1 p2)
+                              newEnd (polar p1 ang drawTarget)
+                        )
+                        (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
+                        (entmod ed)
+                        (entupd e)
+
+                        ;; break symbol "||" near midpoint using entmakex
+                        (setq midS  (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 newEnd)
+                              bMid1 (polar midS ang 0.03)
+                              bMid2 (polar midS ang -0.03)
+                              nAng  (+ ang (/ pi 2.0))
+                              b1s   (polar bMid1 nAng 0.05)
+                              b1e   (polar bMid1 (+ nAng pi) 0.05)
+                              b2s   (polar bMid2 nAng 0.05)
+                              b2e   (polar bMid2 (+ nAng pi) 0.05)
+                        )
+                        (setq breakEnts
+                          (rm-nil
+                            (list
+                              (entmakex (list (cons 0 "LINE") (cons 10 b1s) (cons 11 b1e)))
+                              (entmakex (list (cons 0 "LINE") (cons 10 b2s) (cons 11 b2e)))
+                            )
+                          )
+                        )
+
+                        (setq seg (seg-set seg 'p2 newEnd))
+                        (setq seg (seg-set seg 'shortened T))
+                        (setq seg (seg-set seg 'breakEnts breakEnts))
+
+                        ;; accumulate delta for all subsequent segments
+                        (setq delta (v- newEnd oldEnd))
+                        (if (nonzero-delta-p delta)
+                          (setq cumDelta (v+ cumDelta delta))
+                        )
+                      )
+                    )
+                  )
+                )
+
+                (setq newSegs (cons seg newSegs))
+              )
+              (setq segStack (reverse newSegs))
+              (command "_.REGEN")
+            )
+          )
+        )
+      )
 
       ;; Ask for dimension offset and create aligned dimensions
       (if segStack
@@ -285,6 +476,24 @@
                         )
                         ;; create aligned dimension
                         (command "_.DIMALIGNED" p1 p2 dimPt "")
+                        (setq seg (seg-set seg 'dimEnt (entlast)))
+                        (if (and (cdr (assoc 'shortened seg))
+                                 (cdr (assoc 'dimEnt seg))
+                            )
+                          (progn
+                            (setq dimStr (cdr (assoc 'userLenStr seg)))
+                            (if (or (not dimStr) (= dimStr ""))
+                              (setq dimStr (rtos userVal 2 8))
+                            )
+                            (setq ed (entget (cdr (assoc 'dimEnt seg))))
+                            (if (assoc 1 ed)
+                              (setq ed (subst (cons 1 dimStr) (assoc 1 ed) ed))
+                              (setq ed (append ed (list (cons 1 dimStr))))
+                            )
+                            (entmod ed)
+                            (entupd (cdr (assoc 'dimEnt seg)))
+                          )
+                        )
                       )
                     )
                   )

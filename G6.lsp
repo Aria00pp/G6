@@ -42,23 +42,27 @@
     (reverse out)
   )
 
+  (defun getx (p) (if p (car p) 0.0))
+  (defun gety (p) (if p (cadr p) 0.0))
+  (defun getz (p) (if (and p (cddr p)) (caddr p) 0.0))
+
   ;; true if vector delta is effectively nonzero
   (defun nonzero-delta-p (delta / tol)
     (setq tol 1e-9)
     (and delta
-         (or (> (abs (car delta)) tol)
-             (> (abs (cadr delta)) tol)
-             (> (abs (caddr delta)) tol)
+         (or (> (abs (getx delta)) tol)
+             (> (abs (gety delta)) tol)
+             (> (abs (getz delta)) tol)
          )
     )
   )
 
   (defun add-delta (p d)
-    (list (+ (car p) (car d)) (+ (cadr p) (cadr d)) (+ (caddr p) (caddr d)))
+    (list (+ (getx p) (getx d)) (+ (gety p) (gety d)) (+ (getz p) (getz d)))
   )
 
   (defun sub-pts (a b)
-    (list (- (car a) (car b)) (- (cadr a) (cadr b)) (- (caddr a) (caddr b)))
+    (list (- (getx a) (getx b)) (- (gety a) (gety b)) (- (getz a) (getz b)))
   )
 
   ;; move a LINE entity by delta, guarded and no-op for tiny deltas
@@ -383,6 +387,7 @@
                         (entmod ed)
                         (entupd lineEnt)
                         (setq seg (subst (cons 'p2 newEnd) (assoc 'p2 seg) seg))
+                        (setq seg (subst (cons 'drawLen targetDrawLen) (assoc 'drawLen seg) seg))
                         (setq seg (subst (cons 'shortened T) (assoc 'shortened seg) seg))
                         (setq breakEnts (make-break-markers p1 newEnd))
                         (setq seg (subst (cons 'breakEnts breakEnts) (assoc 'breakEnts seg) seg))
@@ -393,7 +398,7 @@
                 )
                 (setq newStack (cons seg newStack))
               )
-              (setq segStack (reverse newStack))
+              (setq segStack newStack)
             )
           )
         )
@@ -439,7 +444,6 @@
                         (setq dimEnt (entlast))
                         (if dimEnt
                           (progn
-                            (setq seg (subst (cons 'dimEnt dimEnt) (assoc 'dimEnt seg) seg))
                             (if (cdr (assoc 'shortened seg))
                               (progn
                                 (setq dimEd (entget dimEnt)

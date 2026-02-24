@@ -3,8 +3,8 @@
 ;;; G6 (patched)
 ;;; Features:
 ;;;  - Draw chained LINE segments at fixed angles with typed lengths
-;;;  - Break marker with empty gap (WIPEOUT) + bars; size adjustable once with live preview
-;;;    and applies to all breaks (persisted).
+;;;  - Optional break markers as two LINE bars (||), size adjustable with live preview
+;;;    and applies to selected lines (persisted).
 ;;;  - Continue-from point: press C while in length input to pick a new start point without ending.
 ;;;  - Dimensions with satisfaction loop (re-pick offset distance).
 ;;;  - Layer assignment popup + per-layer suffix saved; moves lines + dims + breaks.
@@ -96,194 +96,165 @@
 
 ;;; ------------------------------------------------------------
 ;;; Break parameters and live preview
-;;; params = (d h gap wipeH)
+;;; params = (gapW barH)
 ;;; ------------------------------------------------------------
-(defun g6:breakParamsDefault ( / h d gap wipeH)
-  ;; h is the master size; defaults to 0.06 (about 2x the old small break)
-  (setq h (g6:getEnvReal "G6_BREAK_H" 0.06))
-  (setq d (* h 0.70))
-  (setq gap (* h 2.00))
-  (setq wipeH (* h 3.20))
-  (list d h gap wipeH)
+(defun g6:breakParamsDefault ( / gapW barH)
+  (setq gapW (g6:getEnvReal "G6_BRK_GAPW" 0.12))
+  (setq barH (g6:getEnvReal "G6_BRK_BARH" 0.10))
+  (list gapW barH)
 )
 
 (defun g6:drawPreviewSegs (segs col)
   (foreach s segs (grdraw (car s) (cadr s) col))
 )
 
-(defun g6:previewBreakSegs (mid ang d h gap wipeH / ux uy vx vy b1 b2 t1 t2 r1 r2 r3 r4 segs)
+(defun g6:previewBreakSegs (mid ang gapW barH / ux uy vx vy b1 b2 t1 t2 segs)
   (setq ux (cos ang) uy (sin ang))
   (setq vx (- (sin ang)) vy (cos ang))
-
-  (setq b1 (list (+ (car mid) (* ux (- (/ d 2.0))))
-                 (+ (cadr mid) (* uy (- (/ d 2.0))))
-                 0.0))
-  (setq b2 (list (+ (car mid) (* ux (/ d 2.0)))
-                 (+ (cadr mid) (* uy (/ d 2.0)))
-                 0.0))
-
-  (setq t1 (list (+ (car b1) (* vx (- (/ h 2.0))))
-                 (+ (cadr b1) (* vy (- (/ h 2.0))))
-                 0.0))
-  (setq t2 (list (+ (car b1) (* vx (/ h 2.0)))
-                 (+ (cadr b1) (* vy (/ h 2.0)))
-                 0.0))
+  (setq b1 (list (+ (car mid) (* ux (- (/ gapW 2.0)))) (+ (cadr mid) (* uy (- (/ gapW 2.0)))) 0.0))
+  (setq b2 (list (+ (car mid) (* ux (/ gapW 2.0))) (+ (cadr mid) (* uy (/ gapW 2.0))) 0.0))
+  (setq t1 (list (+ (car b1) (* vx (- (/ barH 2.0)))) (+ (cadr b1) (* vy (- (/ barH 2.0)))) 0.0))
+  (setq t2 (list (+ (car b1) (* vx (/ barH 2.0))) (+ (cadr b1) (* vy (/ barH 2.0))) 0.0))
   (setq segs (list (list t1 t2)))
-
-  (setq t1 (list (+ (car b2) (* vx (- (/ h 2.0))))
-                 (+ (cadr b2) (* vy (- (/ h 2.0))))
-                 0.0))
-  (setq t2 (list (+ (car b2) (* vx (/ h 2.0)))
-                 (+ (cadr b2) (* vy (/ h 2.0)))
-                 0.0))
+  (setq t1 (list (+ (car b2) (* vx (- (/ barH 2.0)))) (+ (cadr b2) (* vy (- (/ barH 2.0)))) 0.0))
+  (setq t2 (list (+ (car b2) (* vx (/ barH 2.0))) (+ (cadr b2) (* vy (/ barH 2.0))) 0.0))
   (setq segs (append segs (list (list t1 t2))))
-
-  ;; wipeout preview rectangle
-  (setq r1 (list (+ (car mid) (+ (* ux (/ gap 2.0)) (* vx (/ wipeH 2.0))))
-                 (+ (cadr mid) (+ (* uy (/ gap 2.0)) (* vy (/ wipeH 2.0))))
-                 0.0))
-  (setq r2 (list (+ (car mid) (+ (* ux (/ gap 2.0)) (* vx (- (/ wipeH 2.0)))))
-                 (+ (cadr mid) (+ (* uy (/ gap 2.0)) (* vy (- (/ wipeH 2.0)))))
-                 0.0))
-  (setq r3 (list (+ (car mid) (+ (* ux (- (/ gap 2.0))) (* vx (- (/ wipeH 2.0)))))
-                 (+ (cadr mid) (+ (* uy (- (/ gap 2.0))) (* vy (- (/ wipeH 2.0)))))
-                 0.0))
-  (setq r4 (list (+ (car mid) (+ (* ux (- (/ gap 2.0))) (* vx (/ wipeH 2.0))))
-                 (+ (cadr mid) (+ (* uy (- (/ gap 2.0))) (* vy (/ wipeH 2.0))))
-                 0.0))
-  (setq segs (append segs (list (list r1 r2) (list r2 r3) (list r3 r4) (list r4 r1))))
   segs
 )
 
-(defun g6:pickBreakParams (sampleEnt params / ed p1 p2 mid ang perp gr typ dat vec dist h d gap wipeH done oldSegs out)
-  (setq out params)
-  (if (null sampleEnt) out
-    (progn
-      (setq ed (entget sampleEnt))
-      (setq p1 (cdr (assoc 10 ed)) p2 (cdr (assoc 11 ed)))
-      (if (or (null p1) (null p2)) out
-        (progn
-          (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2))
-          (setq ang (angle p1 p2))
-          (setq perp (list (- (sin ang)) (cos ang) 0.0))
-
-          (prompt "\nBreak size: move cursor (live preview) and click to set. Enter = keep saved.")
-          (setq oldSegs (g6:previewBreakSegs mid ang (nth 0 out) (nth 1 out) (nth 2 out) (nth 3 out)))
-          (g6:drawPreviewSegs oldSegs 1)
-
-          (setq done nil h nil)
-          (while (not done)
-            (setq gr (grread T 13 0))
-            (setq typ (car gr) dat (cadr gr))
-            (cond
-              ((= typ 5) ;; mouse move
-               (if (and dat (listp dat))
-                 (progn
-                   (setq vec (g6:pt- dat mid))
-                   (setq dist (abs (+ (* (car vec) (car perp)) (* (cadr vec) (cadr perp)))))
-                   (setq h (max 0.01 (* 2.0 dist)))
-                   (setq d (* h 0.70))
-                   (setq gap (* h 2.00))
-                   (setq wipeH (* h 3.20))
-                   (g6:drawPreviewSegs oldSegs 0)
-                   (setq oldSegs (g6:previewBreakSegs mid ang d h gap wipeH))
-                   (g6:drawPreviewSegs oldSegs 1)
-                 )
-               )
-              )
-              ((= typ 3) ;; click
-               (g6:drawPreviewSegs oldSegs 0)
-               (if (null h) (setq h (nth 1 out)))
-               (g6:setEnvReal "G6_BREAK_H" h)
-               (setq d (* h 0.70))
-               (setq gap (* h 2.00))
-               (setq wipeH (* h 3.20))
-               (setq out (list d h gap wipeH))
-               (setq done T)
-              )
-              ((= typ 2) ;; key
-               (cond
-                 ((= dat 13) (progn (g6:drawPreviewSegs oldSegs 0) (setq done T))) ;; Enter
-                 ((= dat 27) (progn (g6:drawPreviewSegs oldSegs 0) (setq done T))) ;; Esc
-               )
+(defun g6:pickBreakOneValue (msg mid ang gapW barH mode / oldSegs done val typed gr typ dat vec dotv)
+  (setq val (if (= mode "GAP") gapW barH))
+  (setq typed "")
+  (setq oldSegs (g6:previewBreakSegs mid ang gapW barH))
+  (g6:drawPreviewSegs oldSegs 1)
+  (prompt msg)
+  (setq done nil)
+  (while (not done)
+    (setq gr (grread T 13 0) typ (car gr) dat (cadr gr))
+    (cond
+      ((= typ 5)
+        (if (and dat (listp dat))
+          (progn
+            (setq vec (g6:pt- dat mid))
+            (if (= mode "GAP")
+              (setq dotv (+ (* (car vec) (cos ang)) (* (cadr vec) (sin ang))))
+              (setq dotv (+ (* (car vec) (- (sin ang))) (* (cadr vec) (cos ang))))
+            )
+            (setq val (max 0.001 (* 2.0 (abs dotv))))
+            (if (= mode "GAP") (setq gapW val) (setq barH val))
+            (g6:drawPreviewSegs oldSegs 0)
+            (setq oldSegs (g6:previewBreakSegs mid ang gapW barH))
+            (g6:drawPreviewSegs oldSegs 1)
+          )
+        )
+      )
+      ((= typ 3) (setq done T))
+      ((= typ 2)
+        (cond
+          ((= dat 13) (setq done T))
+          ((= dat 27) (setq val nil done T))
+          ((= dat 8)
+            (if (> (strlen typed) 0)
+              (setq typed (substr typed 1 (1- (strlen typed))))
+            )
+            (if (> (strlen typed) 0)
+              (progn
+                (setq val (max 0.001 (atof typed)))
+                (if (= mode "GAP") (setq gapW val) (setq barH val))
+                (g6:drawPreviewSegs oldSegs 0)
+                (setq oldSegs (g6:previewBreakSegs mid ang gapW barH))
+                (g6:drawPreviewSegs oldSegs 1)
               )
             )
           )
-          out
+          ((or (and (>= dat 48) (<= dat 57)) (= dat 46))
+            (setq typed (strcat typed (chr dat)))
+            (setq val (max 0.001 (atof typed)))
+            (if (= mode "GAP") (setq gapW val) (setq barH val))
+            (g6:drawPreviewSegs oldSegs 0)
+            (setq oldSegs (g6:previewBreakSegs mid ang gapW barH))
+            (g6:drawPreviewSegs oldSegs 1)
+          )
         )
       )
     )
   )
+  (g6:drawPreviewSegs oldSegs 0)
+  val
 )
 
-(defun g6:breakBlockName (d h / a b)
-  (setq a (itoa (fix (* d 1000000.0))))
-  (setq b (itoa (fix (* h 1000000.0))))
-  (strcat "G6_BRK_" a "_" b)
-)
-
-(defun g6:ensureBreakBlock (d h / blkName)
-  (setq blkName (g6:breakBlockName d h))
-  (if (not (tblsearch "BLOCK" blkName))
+(defun g6:pickBreakParams (sampleEnt params / ed p1 p2 mid ang gapW barH v ans ok)
+  (setq ed (entget sampleEnt)
+        p1 (cdr (assoc 10 ed))
+        p2 (cdr (assoc 11 ed))
+        gapW (nth 0 params)
+        barH (nth 1 params)
+        ok nil)
+  (if (and p1 p2)
     (progn
-      (entmake (list (cons 0 "BLOCK") (cons 2 blkName) (cons 70 0)
-                     (cons 10 (list 0.0 0.0 0.0)) (cons 3 blkName) (cons 1 "")))
-      ;; left bar
-      (entmake (list (cons 0 "LINE") (cons 8 "0")
-                     (cons 10 (list (- (/ d 2.0)) (- (/ h 2.0)) 0.0))
-                     (cons 11 (list (- (/ d 2.0)) (/ h 2.0) 0.0))))
-      ;; right bar
-      (entmake (list (cons 0 "LINE") (cons 8 "0")
-                     (cons 10 (list (/ d 2.0) (- (/ h 2.0)) 0.0))
-                     (cons 11 (list (/ d 2.0) (/ h 2.0) 0.0))))
-      (entmake (list (cons 0 "ENDBLK")))
-    )
-  )
-  blkName
-)
-
-(defun g6:tryWipeoutGap (mid ang gap wipeH / ux uy vx vy p1 p2 p3 p4 plEnt wEnt)
-  (setq ux (cos ang) uy (sin ang))
-  (setq vx (- (sin ang)) vy (cos ang))
-
-  (setq p1 (list (+ (car mid) (+ (* ux (/ gap 2.0)) (* vx (/ wipeH 2.0))))
-                 (+ (cadr mid) (+ (* uy (/ gap 2.0)) (* vy (/ wipeH 2.0))))
-                 0.0))
-  (setq p2 (list (+ (car mid) (+ (* ux (/ gap 2.0)) (* vx (- (/ wipeH 2.0)))))
-                 (+ (cadr mid) (+ (* uy (/ gap 2.0)) (* vy (- (/ wipeH 2.0)))))
-                 0.0))
-  (setq p3 (list (+ (car mid) (+ (* ux (- (/ gap 2.0))) (* vx (- (/ wipeH 2.0)))))
-                 (+ (cadr mid) (+ (* uy (- (/ gap 2.0))) (* vy (- (/ wipeH 2.0)))))
-                 0.0))
-  (setq p4 (list (+ (car mid) (+ (* ux (- (/ gap 2.0))) (* vx (/ wipeH 2.0))))
-                 (+ (cadr mid) (+ (* uy (- (/ gap 2.0))) (* vy (/ wipeH 2.0))))
-                 0.0))
-
-  (setq plEnt
-    (entmakex
-      (list
-        (cons 0 "LWPOLYLINE")
-        (cons 100 "AcDbEntity")
-        (cons 8 "0")
-        (cons 100 "AcDbPolyline")
-        (cons 90 4)
-        (cons 70 1)
-        (cons 10 (list (car p1) (cadr p1)))
-        (cons 10 (list (car p2) (cadr p2)))
-        (cons 10 (list (car p3) (cadr p3)))
-        (cons 10 (list (car p4) (cadr p4)))
+      (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
+            ang (angle p1 p2))
+      (while (not ok)
+        (setq v (g6:pickBreakOneValue "\nPick breaker width (gapW): move/click or type value, Enter=accept, Esc=cancel. " mid ang gapW barH "GAP"))
+        (if (null v)
+          (setq ok 'CANCEL)
+          (setq gapW v)
+        )
+        (if (not (eq ok 'CANCEL))
+          (progn
+            (setq v (g6:pickBreakOneValue "\nPick breaker height (barH): move/click or type value, Enter=accept, Esc=cancel. " mid ang gapW barH "BAR"))
+            (if (null v)
+              (setq ok 'CANCEL)
+              (setq barH v)
+            )
+          )
+        )
+        (if (eq ok 'CANCEL)
+          (setq ok T params nil)
+          (progn
+            (initget "Yes No")
+            (setq ans (getkword "\nBreaker size OK? [Yes/No] <Yes>: "))
+            (if (or (null ans) (= ans "Yes"))
+              (setq ok T params (list gapW barH))
+            )
+          )
+        )
       )
     )
   )
-
-  (setq wEnt nil)
-  (if plEnt
+  (if params
     (progn
-      (command "_.WIPEOUT" "_P" plEnt "_Y")
-      (setq wEnt (entlast))
+      (g6:setEnvReal "G6_BRK_GAPW" (nth 0 params))
+      (g6:setEnvReal "G6_BRK_BARH" (nth 1 params))
     )
   )
-  wEnt
+  params
+)
+
+(defun g6:createBreakerBars (lineEnt gapW barH / ed p1 p2 mid ang ux uy vx vy c1 c2 s1 e1 s2 e2 lay b1 b2)
+  (setq ed (entget lineEnt)
+        p1 (cdr (assoc 10 ed))
+        p2 (cdr (assoc 11 ed))
+        lay (cdr (assoc 8 ed)))
+  (if (and p1 p2)
+    (progn
+      (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
+            ang (angle p1 p2)
+            ux (cos ang)
+            uy (sin ang)
+            vx (- (sin ang))
+            vy (cos ang))
+      (setq c1 (list (+ (car mid) (* ux (- (/ gapW 2.0)))) (+ (cadr mid) (* uy (- (/ gapW 2.0)))) 0.0)
+            c2 (list (+ (car mid) (* ux (/ gapW 2.0))) (+ (cadr mid) (* uy (/ gapW 2.0))) 0.0))
+      (setq s1 (list (+ (car c1) (* vx (- (/ barH 2.0)))) (+ (cadr c1) (* vy (- (/ barH 2.0)))) 0.0)
+            e1 (list (+ (car c1) (* vx (/ barH 2.0))) (+ (cadr c1) (* vy (/ barH 2.0))) 0.0)
+            s2 (list (+ (car c2) (* vx (- (/ barH 2.0)))) (+ (cadr c2) (* vy (- (/ barH 2.0)))) 0.0)
+            e2 (list (+ (car c2) (* vx (/ barH 2.0))) (+ (cadr c2) (* vy (/ barH 2.0))) 0.0))
+      (setq b1 (entmakex (list (cons 0 "LINE") (cons 8 lay) (cons 10 s1) (cons 11 e1))))
+      (setq b2 (entmakex (list (cons 0 "LINE") (cons 8 lay) (cons 10 s2) (cons 11 e2))))
+      (list b1 b2)
+    )
+  )
 )
 
 ;;; ------------------------------------------------------------
@@ -635,7 +606,7 @@
 
 ;;; ------------------------------------------------------------
 ;;; Break map helpers
-;;; breakMap: alist (lineEnt . (wipeoutEnt blockEnt))
+;;; breakMap: alist (lineEnt . (bar1Ent bar2Ent))
 ;;; ------------------------------------------------------------
 (defun g6:deleteBreaks (breakMap / pair ents)
   (while breakMap
@@ -651,8 +622,7 @@
 ;;; ------------------------------------------------------------
 (defun g6:recomputeChains (entList userList chainList shortenFlags scaleFactor breakMap breakParams
                           / chains cid idxs i angs e ed p1 p2 startPt curPt uval drawLen
-                            oldEnds newEnds tol movedPairs chainEnts
-                            d h gap wipeH blkName mid wEnt blkEnt lay newBreakMap k oldEnd newEnd ss)
+                            oldEnds newEnds tol movedPairs chainEnts oldEnd newEnd)
   ;; remove old breaks from this run
   (g6:deleteBreaks breakMap)
 
@@ -663,13 +633,6 @@
     (if (not (member cid chains)) (setq chains (append chains (list cid))))
     (setq i (1+ i))
   )
-
-  ;; unpack break params
-  (setq d (nth 0 breakParams)
-        h (nth 1 breakParams)
-        gap (nth 2 breakParams)
-        wipeH (nth 3 breakParams))
-  (setq blkName (g6:ensureBreakBlock d h))
 
   ;; recompute each chain
   (foreach cid chains
@@ -742,47 +705,9 @@
   )
 
   (command "_.REGEN")
-
-  ;; insert breaks for flagged segments (after recompute)
-  (setq newBreakMap '())
-  (setq i 0)
-  (while (< i (length entList))
-    (setq e (nth i entList))
-    (setq uval (nth i userList))
-    (if (and (nth i shortenFlags) (> uval 150.0))
-      (progn
-        (setq ed (entget e))
-        (setq p1 (cdr (assoc 10 ed)))
-        (setq p2 (cdr (assoc 11 ed)))
-        (setq ang (angle p1 p2))
-        (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2))
-
-        (setq wEnt (g6:tryWipeoutGap mid ang gap wipeH))
-        (command "_.-INSERT" blkName mid 1.0 1.0 (g6:rad->deg ang))
-        (setq blkEnt (entlast))
-
-        ;; same layer as line
-        (setq lay (cdr (assoc 8 ed)))
-        (if lay
-          (progn
-            (if wEnt   (g6:setLayerEnt wEnt lay))
-            (if blkEnt (g6:setLayerEnt blkEnt lay))
-          )
-        )
-
-        ;; bring to front (avoid bleed-through)
-        (setq ss (ssadd))
-        (if wEnt   (ssadd wEnt ss))
-        (if blkEnt (ssadd blkEnt ss))
-        (command "_.DRAWORDER" ss "" "_Front" "")
-
-        (setq newBreakMap (cons (cons e (list wEnt blkEnt)) newBreakMap))
-      )
-    )
-    (setq i (1+ i))
-  )
-  newBreakMap
+  '()
 )
+
 
 ;;; ============================================================
 ;;; Main command
@@ -795,6 +720,7 @@
                i e userLen len nextpt
                dimOff dimOk dimEnts dimMap dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV
                layAns lay suf againAns selSS j eSel idxSel brkPair dimE txtOvr
+               brkAns brkSS eligibleSS entCandidate brkParams gapW barH bars
                )
 
   (defun *error* (msg)
@@ -974,6 +900,60 @@
           (setq entList   (reverse entStack))
           (setq userList  (reverse userLenStack))
           (setq chainList (reverse chainStack))
+        )
+      )
+
+      ;; add break markers to selected lines from this run
+      (if entStack
+        (progn
+          (initget "Yes No")
+          (setq brkAns (getkword "\nAdd break markers (||) to selected lines? [Yes/No] <No>: "))
+          (if (= brkAns "Yes")
+            (progn
+              (setq brkSS (ssget "_:L" '((0 . "LINE"))))
+              (setq eligibleSS (ssadd))
+              (if brkSS
+                (progn
+                  (setq j 0)
+                  (while (< j (sslength brkSS))
+                    (setq entCandidate (ssname brkSS j))
+                    (if (not (null (g6:index-of entCandidate entList)))
+                      (ssadd entCandidate eligibleSS)
+                    )
+                    (setq j (1+ j))
+                  )
+                )
+              )
+              (if (= (sslength eligibleSS) 0)
+                (prompt "\nNo eligible lines selected from this G6 run.")
+                (progn
+                  (setq brkParams (g6:pickBreakParams (ssname eligibleSS 0) (g6:breakParamsDefault)))
+                  (if brkParams
+                    (progn
+                      (setq gapW (nth 0 brkParams)
+                            barH (nth 1 brkParams)
+                            j 0)
+                      (while (< j (sslength eligibleSS))
+                        (setq eSel (ssname eligibleSS j))
+                        (setq brkPair (assoc eSel breakMap))
+                        (if brkPair (foreach be (cdr brkPair) (if (and be (entget be)) (entdel be))))
+                        (setq bars (g6:createBreakerBars eSel gapW barH))
+                        (if bars
+                          (progn
+                            (if brkPair
+                              (setq breakMap (subst (cons eSel bars) brkPair breakMap))
+                              (setq breakMap (cons (cons eSel bars) breakMap))
+                            )
+                          )
+                        )
+                        (setq j (1+ j))
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
         )
       )
 

@@ -1,7 +1,7 @@
 (defun c:G6 ( / pt angList idx done lenStr len gr key nextpt
-                prevPt2 lastLen finishedInput ptsStack entStack lenStack
+                prevPt2 lastLen finishedInput segStack segRec
                 scaleFactor oldOsmode oldCmdecho *error* dimOff
-                userLenStack userLen entList userLenList userVal)
+                userLen segList userVal e)
 
   ;;------------------------------------------------------------
   ;; Error handler: restore system variables
@@ -37,12 +37,8 @@
   ;; user 150 -> drawn length = 1.5
   (setq scaleFactor 0.01)
 
-  ;; stacks for undo
-  (setq ptsStack     '()
-        entStack     '()
-        lenStack     '()
-        userLenStack '()   ;; store user-entered (unscaled) length here
-  )
+  ;; segment stack for undo and post-processing
+  (setq segStack '())
 
   ;;------------------------------------------------------------
   ;; preview function
@@ -133,17 +129,25 @@
                     (if prevPt2 (grdraw pt prevPt2 0))
                     (setq prevPt2 nil)
 
-                    ;; store for undo (scaled length & user length)
-                    (setq ptsStack     (cons pt      ptsStack))
-                    (setq lenStack     (cons len     lenStack))
-                    (setq userLenStack (cons userLen userLenStack))
-
                     ;; draw line (OSNAP is OFF, so no interference)
                     (setq nextpt (polar pt (nth idx angList) len))
                     (command "_.LINE" pt nextpt "")
 
-                    ;; store entity and update current point
-                    (setq entStack (cons (entlast) entStack))
+                    ;; store segment record (newest first) and update current point
+                    (setq segRec
+                          (list
+                            (cons 'p1 pt)
+                            (cons 'p2 nextpt)
+                            (cons 'lineEnt (entlast))
+                            (cons 'drawLen len)
+                            (cons 'userLen userLen)
+                            (cons 'userLenStr lenStr)
+                            (cons 'shortened nil)
+                            (cons 'breakEnts nil)
+                            (cons 'dimEnt nil)
+                          )
+                    )
+                    (setq segStack (cons segRec segStack))
                     (setq pt       nextpt
                           lastLen  len
                           finishedInput T
@@ -157,24 +161,22 @@
 
                ;; U or u => undo last segment
                ((or (= key 85) (= key 117))
-                (if entStack
+                (if segStack
                   (progn
                     ;; remove preview
                     (if prevPt2 (grdraw pt prevPt2 0))
                     (setq prevPt2 nil)
 
                     ;; delete last entity
-                    (entdel (car entStack))
-                    (setq entStack (cdr entStack))
+                    (setq segRec (car segStack))
+                    (if (cdr (assoc 'lineEnt segRec))
+                      (entdel (cdr (assoc 'lineEnt segRec)))
+                    )
+                    (setq segStack (cdr segStack))
 
                     ;; restore previous point and length
-                    (setq pt      (car ptsStack)
-                          ptsStack (cdr ptsStack)
-
-                          lastLen  (car lenStack)
-                          lenStack (cdr lenStack)
-
-                          userLenStack (cdr userLenStack)
+                    (setq pt      (cdr (assoc 'p1 segRec))
+                          lastLen (cdr (assoc 'drawLen segRec))
                     )
 
                     (prompt "\nLast segment undone.")
@@ -242,22 +244,21 @@
       (setvar "OSMODE" oldOsmode)
 
       ;; Ask for dimension offset and create aligned dimensions
-      (if entStack
+      (if segStack
         (progn
           (setq dimOff (getdist "\nDimension offset distance <Enter for no dimensions>: "))
           (if dimOff
             (progn
-              ;; walk entities and user lengths in the same order
-              (setq entList     (reverse entStack))
-              (setq userLenList (reverse userLenStack))
-              (while (and entList userLenList)
-                (setq e        (car entList)
-                      userVal  (car userLenList)
-                      entList     (cdr entList)
-                      userLenList (cdr userLenList)
+              ;; walk segments in draw order
+              (setq segList (reverse segStack))
+              (while segList
+                (setq segRec   (car segList)
+                      segList  (cdr segList)
+                      e        (cdr (assoc 'lineEnt segRec))
+                      userVal  (cdr (assoc 'userLen segRec))
                 )
                 ;; only dimension if user-entered value > 25
-                (if (> userVal 25.0)
+                (if (and e (> userVal 25.0))
                   (progn
                     (setq ed   (entget e)
                           p1   (cdr (assoc 10 ed))

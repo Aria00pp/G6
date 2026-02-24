@@ -6,7 +6,9 @@
                 lineEnt breakEnts oldEnd targetDrawLen newEnd deltaShort
                 dimEnt dimEd dimTxt assignAns chosenLayer keepAssign
                 selCount selIdx pickEnt segMatch lyrNames lyrIdx lyrRec
-                dclPath dclFd dclId dclResult dclSel segMap errnoVal)
+                dclPath dclFd dclId dclResult dclSel segMap errnoVal
+                editAns editSel editCnt editIdx editEnt editStr curStr curNum
+                continuePt continueOsmode)
 
   ;;------------------------------------------------------------
   ;; Error handler: restore system variables
@@ -184,6 +186,31 @@
     (setenv (g6-sfx-key layerName) (if suffix suffix ""))
   )
 
+  (defun g6-find-seg-by-line (stk ent / rec out)
+    (setq out nil)
+    (while (and stk (not out))
+      (setq rec (car stk))
+      (if (= (cdr (assoc 'lineEnt rec)) ent)
+        (setq out rec)
+      )
+      (setq stk (cdr stk))
+    )
+    out
+  )
+
+  (defun g6-replace-seg-by-line (stk ent newSeg / out rec)
+    (setq out '())
+    (while stk
+      (setq rec (car stk))
+      (if (= (cdr (assoc 'lineEnt rec)) ent)
+        (setq out (cons newSeg out))
+        (setq out (cons rec out))
+      )
+      (setq stk (cdr stk))
+    )
+    (reverse out)
+  )
+
   (defun collect-layer-names ( / out rec)
     (setq out '()
           rec (tblnext "LAYER" T)
@@ -296,7 +323,7 @@
           (strcat
             "\nCurrent angle = "
             (rtos (rad->deg (nth idx angList)) 2 0)
-            "  | Enter length (scale 0.01; TAB = angle, U = undo last, ENTER = finish): "
+            "  | Enter length (scale 0.01; TAB = angle, C = continue from point, U = undo last, ENTER = finish): "
           )
         )
 
@@ -407,6 +434,20 @@
                 )
                )
 
+               ;; C or c => continue from another point
+               ((or (= key 67) (= key 99))
+                (if prevPt2 (grdraw pt prevPt2 0))
+                (setq prevPt2 nil)
+                (setq continueOsmode (getvar "OSMODE"))
+                (setvar "OSMODE" oldOsmode)
+                (setq continuePt (getpoint "\nContinue from point: "))
+                (setvar "OSMODE" continueOsmode)
+                (if continuePt
+                  (setq pt continuePt)
+                )
+                (updatePreview)
+               )
+
                ;; Backspace => delete last character of length
                ((= key 8)
                 (if (> (strlen lenStr) 0)
@@ -462,6 +503,62 @@
       ;; After drawing: restore OSNAP first, then manage dimensions
       ;;--------------------------------------------------------
       (setvar "OSMODE" oldOsmode)
+
+      (initget "Yes No")
+      (setq editAns (getkword "\nEdit typed measurements? [Yes/No] <No>: "))
+      (if (= editAns "Yes")
+        (progn
+          (setq editSel (ssget '((0 . "LINE"))))
+          (if editSel
+            (progn
+              (setq editCnt (sslength editSel)
+                    editIdx 0
+              )
+              (while (< editIdx editCnt)
+                (setq editEnt (ssname editSel editIdx)
+                      seg (g6-find-seg-by-line segStack editEnt)
+                )
+                (if seg
+                  (progn
+                    (setq curStr (cdr (assoc 'userLenStr seg))
+                          curNum (cdr (assoc 'userLen seg))
+                    )
+                    (if (or (not curStr) (= curStr ""))
+                      (setq curStr (rtos curNum 2 8))
+                    )
+                    (setq editStr (getstring T (strcat "\nNew typed length for selected segment <" curStr ">: ")))
+                    (if (and editStr (> (strlen editStr) 0))
+                      (progn
+                        (setq seg (subst (cons 'userLenStr editStr) (assoc 'userLenStr seg) seg))
+                        (setq seg (subst (cons 'userLen (abs (atof editStr))) (assoc 'userLen seg) seg))
+                        (setq segStack (g6-replace-seg-by-line segStack editEnt seg))
+
+                        (setq dimEnt (cdr (assoc 'dimEnt seg)))
+                        (if dimEnt
+                          (progn
+                            (setq userVal (cdr (assoc 'userLen seg))
+                                  userLen (cdr (assoc 'userLenStr seg))
+                            )
+                            (if (or (not userLen) (= userLen ""))
+                              (setq userLen (rtos userVal 2 8))
+                            )
+                            (setq dimEd (entget dimEnt)
+                                  chosenLayer (if dimEd (cdr (assoc 8 dimEd)) nil)
+                                  dimTxt (if chosenLayer (g6-get-sfx chosenLayer) "")
+                            )
+                            (set-dim-override-text dimEnt (strcat userLen dimTxt))
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+                (setq editIdx (1+ editIdx))
+              )
+            )
+          )
+        )
+      )
 
       (initget "Yes No")
       (setq shortenAns (getkword "\nShorten selected long lines to 150? [Yes/No] <No>: "))

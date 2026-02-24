@@ -4,7 +4,9 @@
                 userLen userVal seg segList e ed p1 p2 mid ang nAng dimPt
                 shortenAns sel ssN i selEnt drawOrder newStack cumDelta
                 lineEnt breakEnts oldEnd targetDrawLen newEnd deltaShort
-                dimEnt dimEd dimTxt)
+                dimEnt dimEd dimTxt assignAns chosenLayer keepAssign
+                selCount selIdx pickEnt segMatch lyrNames lyrIdx lyrRec
+                dclPath dclFd dclId dclResult dclSel)
 
   ;;------------------------------------------------------------
   ;; Error handler: restore system variables
@@ -107,6 +109,82 @@
           b2 (entmakex (list (cons 0 "LINE") (cons 10 m2a) (cons 11 m2b)))
     )
     (rm-nil (list b1 b2))
+  )
+
+  (defun set-entity-layer (ent lay / entData layPair)
+    (if (and ent lay)
+      (progn
+        (setq entData (entget ent))
+        (if entData
+          (progn
+            (setq layPair (assoc 8 entData))
+            (if layPair
+              (setq entData (subst (cons 8 lay) layPair entData))
+              (setq entData (append entData (list (cons 8 lay))))
+            )
+            (entmod entData)
+            (entupd ent)
+          )
+        )
+      )
+    )
+  )
+
+  (defun collect-layer-names ( / out rec)
+    (setq out '()
+          rec (tblnext "LAYER" T)
+    )
+    (while rec
+      (setq out (append out (list (cdr (assoc 2 rec)))))
+      (setq rec (tblnext "LAYER"))
+    )
+    out
+  )
+
+  (defun choose-layer-dialog (layers / result)
+    (setq result nil
+          dclPath (strcat (getvar "TEMPPREFIX") "g6_layer_pick.dcl")
+          dclFd (open dclPath "w")
+    )
+    (if dclFd
+      (progn
+        (write-line "g6layerpick : dialog {" dclFd)
+        (write-line "  label = \"Select Layer\";" dclFd)
+        (write-line "  : list_box { key = \"layer_list\"; width = 40; height = 14; }" dclFd)
+        (write-line "  ok_cancel;" dclFd)
+        (write-line "}" dclFd)
+        (close dclFd)
+        (setq dclId (load_dialog dclPath))
+        (if (and dclId (>= dclId 0))
+          (progn
+            (if (new_dialog "g6layerpick" dclId)
+              (progn
+                (start_list "layer_list")
+                (foreach lyrRec layers
+                  (add_list lyrRec)
+                )
+                (end_list)
+                (setq dclSel "0")
+                (action_tile "layer_list" "(setq dclSel $value)")
+                (action_tile "accept" "(done_dialog 1)")
+                (action_tile "cancel" "(done_dialog 0)")
+                (setq dclResult (start_dialog))
+                (if (= dclResult 1)
+                  (progn
+                    (setq lyrIdx (atoi dclSel))
+                    (if (and (>= lyrIdx 0) (< lyrIdx (length layers)))
+                      (setq result (nth lyrIdx layers))
+                    )
+                  )
+                )
+              )
+            )
+            (unload_dialog dclId)
+          )
+        )
+      )
+    )
+    result
   )
 
   ;; allowed angles: 30, 90, 150, -150, -90, -30
@@ -411,11 +489,14 @@
           (if dimOff
             (progn
               ;; walk segments in draw order
-              (setq segList (reverse segStack))
+              (setq segList (reverse segStack)
+                    newStack '()
+              )
               (while segList
                 (setq seg     (car segList)
                       segList (cdr segList)
                       userVal (cdr (assoc 'userLen seg))
+                      dimEnt nil
                 )
                 ;; only dimension if user-entered value > 25
                 (if (> userVal 25.0)
@@ -460,9 +541,65 @@
                                 (entupd dimEnt)
                               )
                             )
+                            (if (assoc 'dimEnt seg)
+                              (setq seg (subst (cons 'dimEnt dimEnt) (assoc 'dimEnt seg) seg))
+                              (setq seg (append seg (list (cons 'dimEnt dimEnt))))
+                            )
                           )
                         )
                       )
+                    )
+                  )
+                )
+                (setq newStack (cons seg newStack))
+              )
+              (setq segStack newStack)
+            )
+          )
+        )
+      )
+
+      (initget "Yes No")
+      (setq assignAns (getkword "\nAssign layers to lines and dimensions? [Yes/No] <No>: "))
+      (if (= assignAns "Yes")
+        (progn
+          (setq lyrNames (collect-layer-names)
+                keepAssign T
+          )
+          (while (and keepAssign lyrNames)
+            (setq chosenLayer (choose-layer-dialog lyrNames))
+            (if (not chosenLayer)
+              (setq keepAssign nil)
+              (progn
+                (setq sel (ssget '((0 . "LINE"))))
+                (if sel
+                  (progn
+                    (setq selCount (sslength sel)
+                          selIdx 0
+                    )
+                    (while (< selIdx selCount)
+                      (setq pickEnt (ssname sel selIdx)
+                            segMatch nil
+                            segList segStack
+                      )
+                      (while (and segList (not segMatch))
+                        (setq seg (car segList)
+                              segList (cdr segList)
+                        )
+                        (if (= pickEnt (cdr (assoc 'lineEnt seg)))
+                          (setq segMatch seg)
+                        )
+                      )
+                      (if segMatch
+                        (progn
+                          (set-entity-layer (cdr (assoc 'lineEnt segMatch)) chosenLayer)
+                          (foreach e (rm-nil (cdr (assoc 'breakEnts segMatch)))
+                            (set-entity-layer e chosenLayer)
+                          )
+                          (set-entity-layer (cdr (assoc 'dimEnt segMatch)) chosenLayer)
+                        )
+                      )
+                      (setq selIdx (1+ selIdx))
                     )
                   )
                 )

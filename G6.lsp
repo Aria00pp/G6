@@ -236,6 +236,7 @@
         p1 (cdr (assoc 10 ed))
         p2 (cdr (assoc 11 ed))
         lay (cdr (assoc 8 ed)))
+  (if (null lay) (setq lay "0"))
   (if (and p1 p2)
     (progn
       (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
@@ -918,7 +919,7 @@
                   (while (< j (sslength brkSS))
                     (setq entCandidate (ssname brkSS j))
                     (if (not (null (g6:index-of entCandidate entList)))
-                      (ssadd entCandidate eligibleSS)
+                      (setq eligibleSS (ssadd entCandidate eligibleSS))
                     )
                     (setq j (1+ j))
                   )

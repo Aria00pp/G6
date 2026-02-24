@@ -1,7 +1,10 @@
 (defun c:G6 ( / pt angList idx done lenStr len gr key nextpt
                 prevPt2 lastLen finishedInput segStack
                 scaleFactor oldOsmode oldCmdecho *error* dimOff
-                userLen userVal seg segList e ed p1 p2 mid ang nAng dimPt)
+                userLen userVal seg segList e ed p1 p2 mid ang nAng dimPt
+                shortenAns sel ssN i selEnt drawOrder newStack cumDelta
+                lineEnt breakEnts oldEnd targetDrawLen newEnd deltaShort
+                dimEnt dimEd dimTxt)
 
   ;;------------------------------------------------------------
   ;; Error handler: restore system variables
@@ -28,6 +31,83 @@
   ;;------------------------------------------------------------
   (defun deg->rad (d) (* pi (/ d 180.0)))
   (defun rad->deg (r) (* 180.0 (/ r pi)))
+
+  ;; remove nil values from list (pure AutoLISP)
+  (defun rm-nil (lst / out)
+    (setq out '())
+    (while lst
+      (if (car lst) (setq out (cons (car lst) out)))
+      (setq lst (cdr lst))
+    )
+    (reverse out)
+  )
+
+  (defun getx (p) (if p (car p) 0.0))
+  (defun gety (p) (if p (cadr p) 0.0))
+  (defun getz (p) (if (and p (cddr p)) (caddr p) 0.0))
+
+  ;; true if vector delta is effectively nonzero
+  (defun nonzero-delta-p (delta / tol)
+    (setq tol 1e-9)
+    (and delta
+         (or (> (abs (getx delta)) tol)
+             (> (abs (gety delta)) tol)
+             (> (abs (getz delta)) tol)
+         )
+    )
+  )
+
+  (defun add-delta (p d)
+    (list (+ (getx p) (getx d)) (+ (gety p) (gety d)) (+ (getz p) (getz d)))
+  )
+
+  (defun sub-pts (a b)
+    (list (- (getx a) (getx b)) (- (gety a) (gety b)) (- (getz a) (getz b)))
+  )
+
+  ;; move a LINE entity by delta, guarded and no-op for tiny deltas
+  (defun move-line-by-delta (ent delta / ed sp ep)
+    (if (and ent (nonzero-delta-p delta))
+      (progn
+        (setq ed (entget ent)
+              sp (and ed (assoc 10 ed))
+              ep (and ed (assoc 11 ed))
+        )
+        (if (and ed sp ep)
+          (progn
+            (setq ed (subst (cons 10 (add-delta (cdr sp) delta)) sp ed))
+            (setq ed (subst (cons 11 (add-delta (cdr ep) delta)) ep ed))
+            (entmod ed)
+            (entupd ent)
+          )
+        )
+      )
+    )
+  )
+
+  (defun move-breaks-by-delta (breakEnts delta / be)
+    (if (nonzero-delta-p delta)
+      (foreach be (rm-nil breakEnts)
+        (move-line-by-delta be delta)
+      )
+    )
+  )
+
+  (defun make-break-markers (sp ep / mid ang nAng m1a m1b m2a m2b mkLen gap b1 b2)
+    (setq mid  (mapcar (function (lambda (a b) (/ (+ a b) 2.0))) sp ep)
+          ang  (angle sp ep)
+          nAng (+ ang (/ pi 2.0))
+          mkLen 0.08
+          gap   0.06
+          m1a (polar (polar mid ang (- gap)) nAng (- (/ mkLen 2.0)))
+          m1b (polar (polar mid ang (- gap)) nAng (/ mkLen 2.0))
+          m2a (polar (polar mid ang gap)      nAng (- (/ mkLen 2.0)))
+          m2b (polar (polar mid ang gap)      nAng (/ mkLen 2.0))
+          b1 (entmakex (list (cons 0 "LINE") (cons 10 m1a) (cons 11 m1b)))
+          b2 (entmakex (list (cons 0 "LINE") (cons 10 m2a) (cons 11 m2b)))
+    )
+    (rm-nil (list b1 b2))
+  )
 
   ;; allowed angles: 30, 90, 150, -150, -90, -30
   (setq angList (mapcar 'deg->rad '(30 90 150 -150 -90 -30)))
@@ -142,6 +222,9 @@
                           (cons 'lineEnt (entlast))
                           (cons 'drawLen len)
                           (cons 'userLen userLen)
+                          (cons 'userLenStr lenStr)
+                          (cons 'shortened nil)
+                          (cons 'breakEnts nil)
                           (cons 'dimEnt nil)
                         )
                         segStack
@@ -248,6 +331,79 @@
       ;;--------------------------------------------------------
       (setvar "OSMODE" oldOsmode)
 
+      (initget "Yes No")
+      (setq shortenAns (getkword "\nShorten selected long lines to 150? [Yes/No] <No>: "))
+      (if (= shortenAns "Yes")
+        (progn
+          (setq sel (ssget '((0 . "LINE"))))
+          (if (and sel segStack)
+            (progn
+              (setq targetDrawLen (* 150.0 scaleFactor)
+                    drawOrder (reverse segStack)
+                    newStack '()
+                    cumDelta '(0.0 0.0 0.0)
+              )
+              (while drawOrder
+                (setq seg      (car drawOrder)
+                      drawOrder (cdr drawOrder)
+                      lineEnt  (cdr (assoc 'lineEnt seg))
+                      breakEnts (cdr (assoc 'breakEnts seg))
+                )
+
+                ;; move current segment and existing markers by cumulative delta
+                (move-line-by-delta lineEnt cumDelta)
+                (move-breaks-by-delta breakEnts cumDelta)
+
+                ;; refresh from live entity
+                (setq ed (and lineEnt (entget lineEnt))
+                      p1 (and ed (cdr (assoc 10 ed)))
+                      p2 (and ed (cdr (assoc 11 ed)))
+                )
+                (if p1 (setq seg (subst (cons 'p1 p1) (assoc 'p1 seg) seg)))
+                (if p2 (setq seg (subst (cons 'p2 p2) (assoc 'p2 seg) seg)))
+
+                ;; selected + this run + long user length
+                (setq ssN (if sel (sslength sel) 0)
+                      i 0
+                      selEnt nil
+                )
+                (while (and (< i ssN) (not selEnt))
+                  (if (= (ssname sel i) lineEnt)
+                    (setq selEnt lineEnt)
+                  )
+                  (setq i (1+ i))
+                )
+
+                (if (and selEnt p1 p2 (> (cdr (assoc 'userLen seg)) 150.0))
+                  (progn
+                    (setq oldEnd p2
+                          ang (angle p1 p2)
+                          newEnd (polar p1 ang targetDrawLen)
+                          deltaShort (sub-pts newEnd oldEnd)
+                    )
+                    (if (assoc 11 ed)
+                      (progn
+                        (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
+                        (entmod ed)
+                        (entupd lineEnt)
+                        (setq seg (subst (cons 'p2 newEnd) (assoc 'p2 seg) seg))
+                        (setq seg (subst (cons 'drawLen targetDrawLen) (assoc 'drawLen seg) seg))
+                        (setq seg (subst (cons 'shortened T) (assoc 'shortened seg) seg))
+                        (setq breakEnts (make-break-markers p1 newEnd))
+                        (setq seg (subst (cons 'breakEnts breakEnts) (assoc 'breakEnts seg) seg))
+                        (setq cumDelta (add-delta cumDelta deltaShort))
+                      )
+                    )
+                  )
+                )
+                (setq newStack (cons seg newStack))
+              )
+              (setq segStack newStack)
+            )
+          )
+        )
+      )
+
       ;; Ask for dimension offset and create aligned dimensions
       (if segStack
         (progn
@@ -285,6 +441,27 @@
                         )
                         ;; create aligned dimension
                         (command "_.DIMALIGNED" p1 p2 dimPt "")
+                        (setq dimEnt (entlast))
+                        (if dimEnt
+                          (progn
+                            (if (cdr (assoc 'shortened seg))
+                              (progn
+                                (setq dimEd (entget dimEnt)
+                                      dimTxt (cdr (assoc 'userLenStr seg))
+                                )
+                                (if (or (not dimTxt) (= dimTxt ""))
+                                  (setq dimTxt (rtos userVal 2 8))
+                                )
+                                (if (assoc 1 dimEd)
+                                  (setq dimEd (subst (cons 1 dimTxt) (assoc 1 dimEd) dimEd))
+                                  (setq dimEd (append dimEd (list (cons 1 dimTxt))))
+                                )
+                                (entmod dimEd)
+                                (entupd dimEnt)
+                              )
+                            )
+                          )
+                        )
                       )
                     )
                   )

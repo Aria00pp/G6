@@ -4,7 +4,7 @@
                 userLen segList userVal e
                 doShorten threshold capLen eligibleEnts tmpSegList tmpRec
                 sel chosenEnts i entSel chosenEntsOrdered orderedSegs
-                curRec seekSeg oldEnd capDraw liveP1 liveP2 liveAng newEnd delta
+                curRec seekSeg oldStart oldEnd capDraw liveP1 liveP2 liveAng newEnd delta
                 adjMap moveSegs moveRec moveEnt moveEd moveP1 moveP2 newP1 newP2
                 ed p1 p2 mid ang nAng dimPt)
 
@@ -41,34 +41,35 @@
       (cons (cons key val) rec)
     )
   )
-  (defun update-seg-in-stack (stack ent newRec / cur)
-    (if stack
-      (progn
-        (setq cur (car stack))
-        (if (= (cdr (assoc 'lineEnt cur)) ent)
-          (cons newRec (cdr stack))
-          (cons cur (update-seg-in-stack (cdr stack) ent newRec))
-        )
+  (defun update-seg-in-stack (stack ent newRec / out cur)
+    (setq out '())
+    (while stack
+      (setq cur   (car stack)
+            stack (cdr stack)
       )
-      nil
+      (if (= (cdr (assoc 'lineEnt cur)) ent)
+        (setq out (cons newRec out))
+        (setq out (cons cur out))
+      )
     )
+    (reverse out)
   )
-  (defun refresh-seg-endpoints (stack / cur ent ed p1 p2)
-    (if stack
-      (progn
-        (setq cur (car stack)
-              ent (cdr (assoc 'lineEnt cur))
-              ed  (and ent (entget ent))
-              p1  (and ed (cdr (assoc 10 ed)))
-              p2  (and ed (cdr (assoc 11 ed)))
-        )
-        (if (and p1 p2)
-          (setq cur (rec-set (rec-set cur 'p1 p1) 'p2 p2))
-        )
-        (cons cur (refresh-seg-endpoints (cdr stack)))
+  (defun refresh-seg-endpoints (stack / out cur ent ed p1 p2)
+    (setq out '())
+    (while stack
+      (setq cur   (car stack)
+            stack (cdr stack)
+            ent   (cdr (assoc 'lineEnt cur))
+            ed    (and ent (entget ent))
+            p1    (and ed (cdr (assoc 10 ed)))
+            p2    (and ed (cdr (assoc 11 ed)))
       )
-      nil
+      (if (and p1 p2)
+        (setq cur (rec-set (rec-set cur 'p1 p1) 'p2 p2))
+      )
+      (setq out (cons cur out))
     )
+    (reverse out)
   )
   (defun add-adj (adj key rec / pair)
     (setq pair (assoc key adj))
@@ -77,18 +78,20 @@
       (cons (cons key (list rec)) adj)
     )
   )
-  (defun build-adj-map (stack / adj cur p1)
+  (defun build-adj-map (stack / adj cur p1 p2)
     (setq adj '())
     (while stack
       (setq cur (car stack)
             p1  (cdr (assoc 'p1 cur))
+            p2  (cdr (assoc 'p2 cur))
       )
       (if p1 (setq adj (add-adj adj p1 cur)))
+      (if p2 (setq adj (add-adj adj p2 cur)))
       (setq stack (cdr stack))
     )
     adj
   )
-  (defun downstream-segs (adj startPt / queue seenPts seenEnts out node pair rec recs ent p2)
+  (defun downstream-segs (adj startPt skipEnt / queue seenPts seenEnts out node pair rec recs ent rp1 rp2)
     (setq queue   (list startPt)
           seenPts '()
           seenEnts '()
@@ -109,13 +112,17 @@
                   recs (cdr recs)
                   ent  (cdr (assoc 'lineEnt rec))
             )
-            (if (not (member ent seenEnts))
+            (if (and (/= ent skipEnt)
+                     (not (member ent seenEnts))
+                )
               (progn
                 (setq seenEnts (cons ent seenEnts)
                       out      (cons rec out)
-                      p2       (cdr (assoc 'p2 rec))
+                      rp1      (cdr (assoc 'p1 rec))
+                      rp2      (cdr (assoc 'p2 rec))
                 )
-                (if p2 (setq queue (append queue (list p2))))
+                (if rp1 (setq queue (append queue (list rp1))))
+                (if rp2 (setq queue (append queue (list rp2))))
               )
             )
           )
@@ -424,6 +431,7 @@
                             (setq ed        (entget entSel)
                                   liveP1    (cdr (assoc 10 ed))
                                   liveP2    (cdr (assoc 11 ed))
+                                  oldStart  liveP1
                                   oldEnd    liveP2
                                   capDraw   (* capLen scaleFactor)
                                   liveAng   (angle liveP1 liveP2)
@@ -442,7 +450,7 @@
 
                             (setq segStack (refresh-seg-endpoints segStack))
                             (setq adjMap   (build-adj-map segStack))
-                            (setq moveSegs (downstream-segs adjMap oldEnd))
+                            (setq moveSegs (downstream-segs adjMap oldEnd entSel))
 
                             (while moveSegs
                               (setq moveRec  (car moveSegs)

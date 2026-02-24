@@ -3,14 +3,12 @@
 ;;; G6 (patched)
 ;;; Features:
 ;;;  - Draw chained LINE segments at fixed angles with typed lengths
-;;;  - Optional shortening: selected segments with typed length >150 are drawn as 150 (display),
-;;;    but dimensions show the typed value.
 ;;;  - Break marker with empty gap (WIPEOUT) + bars; size adjustable once with live preview
 ;;;    and applies to all breaks (persisted).
 ;;;  - Continue-from point: press C while in length input to pick a new start point without ending.
 ;;;  - Dimensions with satisfaction loop (re-pick offset distance).
 ;;;  - Layer assignment popup + per-layer suffix saved; moves lines + dims + breaks.
-;;;  - Connected LINE networks stay attached when joints move (handles multiple shorten selections).
+;;;  - Connected LINE networks stay attached when joints move.
 ;;; ============================================================
 
 (defun g6:deg->rad (d) (* pi (/ d 180.0)))
@@ -649,7 +647,7 @@
 )
 
 ;;; ------------------------------------------------------------
-;;; Recompute chains after shortening (and move connected lines)
+;;; Internal recompute helper (currently not used by c:G6)
 ;;; ------------------------------------------------------------
 (defun g6:recomputeChains (entList userList chainList shortenFlags scaleFactor breakMap breakParams
                           / chains cid idxs i angs e ed p1 p2 startPt curPt uval drawLen
@@ -745,7 +743,7 @@
 
   (command "_.REGEN")
 
-  ;; insert breaks for shortened segments (after recompute)
+  ;; insert breaks for flagged segments (after recompute)
   (setq newBreakMap '())
   (setq i 0)
   (while (< i (length entList))
@@ -793,11 +791,11 @@
                pt prevPt2 lenStr finishedInput done lastLen gr key
                angList idx scaleFactor
                ptsStack entStack lenStack userLenStack chainStack chainId
-               entList userList chainList shortenFlags breakMap breakParams
-               shortAns ss selEnts i e userLen len nextpt
+               entList userList chainList breakMap
+               i e userLen len nextpt
                dimOff dimOk dimEnts dimMap dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV
                layAns lay suf againAns selSS j eSel idxSel brkPair dimE txtOvr
-               anyShort sampleEnt)
+               )
 
   (defun *error* (msg)
     (if oldOsmode  (setvar "OSMODE"  oldOsmode))
@@ -825,8 +823,6 @@
         chainId 0
         breakMap '()
   )
-
-  (setq breakParams (g6:breakParamsDefault))
 
   (defun updatePreview ( / curAng curLen curEnd tmp)
     (if prevPt2 (grdraw pt prevPt2 0))
@@ -981,21 +977,7 @@
         )
       )
 
-      ;; initialize shorten flags
-      (setq shortenFlags '())
-      (if entStack
-        (progn
-          (setq i 0)
-          (while (< i (length entList))
-            (setq shortenFlags (append shortenFlags (list nil)))
-            (setq i (1+ i))
-          )
-        )
-      )
-
-      ;; 1) Shorten feature removed (per user request)
-
-      ;; 2) Dimensions with satisfaction loop
+      ;; 1) Dimensions with satisfaction loop
       (setq dimMap '())
       (if entStack
         (progn
@@ -1063,7 +1045,7 @@
         )
       )
 
-      ;; 3) Layer assignment + suffix
+      ;; 2) Layer assignment + suffix
       (if entStack
         (progn
           (initget "Yes No")

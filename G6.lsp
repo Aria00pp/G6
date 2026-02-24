@@ -97,14 +97,19 @@
     )
   )
 
-  (defun move-entity-by-delta (ent delta / ed)
+  (defun move-entity-by-delta (ent delta / ed ss)
     (if (and ent (nonzero-delta-p delta))
       (progn
         (setq ed (entget ent))
         (if ed
           (if (= (cdr (assoc 0 ed)) "LINE")
             (move-line-by-delta ent delta)
-            (command "_.MOVE" ent "" '(0 0 0) delta)
+            (progn
+              (setq ss (ssadd ent))
+              (if ss
+                (command "_.MOVE" ss "" '(0 0 0) delta)
+              )
+            )
           )
         )
       )
@@ -603,29 +608,35 @@
             (if p1 (setq seg (subst (cons 'p1 p1) (assoc 'p1 seg) seg)))
             (if p2 (setq seg (subst (cons 'p2 p2) (assoc 'p2 seg) seg)))
 
-            (setq userVal (cdr (assoc 'userLen seg)))
-            (setq len (distance p1 p2))
-            (setq targetDrawLen (* userVal scaleFactor))
-
-            (if (and lineEnt p1 p2
-                     (not (cdr (assoc 'shortened seg)))
-                     (> targetDrawLen 0.0)
-                     (> (abs (- targetDrawLen len)) 1e-6)
-                )
+            (if (and p1 p2 lineEnt)
               (progn
-                (setq oldEnd p2
-                      ang (angle p1 p2)
-                      newEnd (polar p1 ang targetDrawLen)
-                      deltaShort (sub-pts newEnd oldEnd)
-                )
-                (if (assoc 11 ed)
+                (setq userVal (cdr (assoc 'userLen seg)))
+                (setq len (distance p1 p2))
+                (setq targetDrawLen (* userVal scaleFactor))
+
+                (if (and (not (cdr (assoc 'shortened seg)))
+                         (> targetDrawLen 0.0)
+                         (> (abs (- targetDrawLen len)) 1e-6)
+                    )
                   (progn
-                    (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
-                    (entmod ed)
-                    (entupd lineEnt)
-                    (setq seg (subst (cons 'p2 newEnd) (assoc 'p2 seg) seg))
-                    (setq seg (subst (cons 'drawLen targetDrawLen) (assoc 'drawLen seg) seg))
-                    (setq cumDelta (add-delta cumDelta deltaShort))
+                    (setq oldEnd p2
+                          ang (angle p1 p2)
+                          newEnd (polar p1 ang targetDrawLen)
+                          deltaShort (sub-pts newEnd oldEnd)
+                    )
+                    (if (assoc 11 ed)
+                      (progn
+                        (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
+                        (entmod ed)
+                        (entupd lineEnt)
+                        (setq seg (subst (cons 'p2 newEnd) (assoc 'p2 seg) seg))
+                        (setq seg (subst (cons 'drawLen targetDrawLen) (assoc 'drawLen seg) seg))
+                        (if (and dimEnt (nonzero-delta-p deltaShort))
+                          (move-entity-by-delta dimEnt deltaShort)
+                        )
+                        (setq cumDelta (add-delta cumDelta deltaShort))
+                      )
+                    )
                   )
                 )
               )

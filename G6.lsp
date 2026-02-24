@@ -47,6 +47,21 @@
   )
   (if lst i nil)
 )
+(defun g6:resolveSourceLine (eSel entList breakMap / src pair)
+  (if (not (null (g6:index-of eSel entList)))
+    eSel
+    (progn
+      (setq src nil)
+      (while (and breakMap (null src))
+        (setq pair (car breakMap))
+        (if (member eSel (cdr pair)) (setq src (car pair)))
+        (setq breakMap (cdr breakMap))
+      )
+      src
+    )
+  )
+)
+
 
 ;;; ------------------------------------------------------------
 ;;; basic point/vector helpers
@@ -723,6 +738,7 @@
                layAns lay suf againAns selSS j eSel idxSel brkPair dimE txtOvr
                brkAns brkSS eligibleSS entCandidate brkParams gapW barH bars
                oldTail oldTailEd oldTailEnd oldLineEd g1 g2 tailEnt lay
+               lineLen gapUse resolvedSel
                )
 
   (defun *error* (msg)
@@ -967,12 +983,17 @@
 
                         (if (and p1 p2)
                           (progn
+                            (setq lineLen (distance p1 p2)
+                                  gapUse gapW)
+                            (if (>= gapUse lineLen)
+                              (setq gapUse (max 0.001 (* 0.5 lineLen)))
+                            )
                             (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
                                   ang (angle p1 p2)
-                                  g1 (polar mid (+ ang pi) (/ gapW 2.0))
-                                  g2 (polar mid ang (/ gapW 2.0)))
+                                  g1 (polar mid (+ ang pi) (/ gapUse 2.0))
+                                  g2 (polar mid ang (/ gapUse 2.0)))
 
-                            (setq bars (g6:createBreakerBars eSel gapW barH))
+                            (setq bars (g6:createBreakerBars eSel gapUse barH))
 
                             (setq ed (subst (cons 11 g1) (assoc 11 ed) ed))
                             (entmod ed)
@@ -1097,19 +1118,20 @@
                         (setq j 0)
                         (while (< j (sslength selSS))
                           (setq eSel (ssname selSS j))
-                          (setq idxSel (g6:index-of eSel entList))
+                          (setq resolvedSel (g6:resolveSourceLine eSel entList breakMap))
+                          (setq idxSel (if resolvedSel (g6:index-of resolvedSel entList) nil))
                           (if (not (null idxSel))
                             (progn
-                              (g6:setLayerEnt eSel lay)
+                              (g6:setLayerEnt resolvedSel lay)
 
                               ;; breaks for that line (if any)
-                              (setq brkPair (assoc eSel breakMap))
+                              (setq brkPair (assoc resolvedSel breakMap))
                               (if brkPair
                                 (foreach be (cdr brkPair) (g6:setLayerEnt be lay))
                               )
 
                               ;; dimension + suffix (if any)
-                              (setq dimE (cdr (assoc eSel dimMap)))
+                              (setq dimE (cdr (assoc resolvedSel dimMap)))
                               (if dimE
                                 (progn
                                   (g6:setLayerEnt dimE lay)

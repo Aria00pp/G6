@@ -97,6 +97,20 @@
     )
   )
 
+  (defun move-entity-by-delta (ent delta / ed)
+    (if (and ent (nonzero-delta-p delta))
+      (progn
+        (setq ed (entget ent))
+        (if ed
+          (if (= (cdr (assoc 0 ed)) "LINE")
+            (move-line-by-delta ent delta)
+            (command "_.MOVE" ent "" '(0 0 0) delta)
+          )
+        )
+      )
+    )
+  )
+
   (defun make-break-markers (sp ep / mid ang nAng m1a m1b m2a m2b mkLen gap b1 b2)
     (setq mid  (mapcar (function (lambda (a b) (/ (+ a b) 2.0))) sp ep)
           ang  (angle sp ep)
@@ -557,6 +571,68 @@
               )
             )
           )
+        )
+      )
+
+      (initget "Yes No")
+      (setq editAns (getkword "\nApply edited measurements to geometry? [Yes/No] <Yes>: "))
+      (if (or (not editAns) (= editAns "Yes"))
+        (progn
+          (setq drawOrder (reverse segStack)
+                cumDelta '(0.0 0.0 0.0)
+                newStack '()
+          )
+          (while drawOrder
+            (setq seg      (car drawOrder)
+                  drawOrder (cdr drawOrder)
+                  lineEnt  (cdr (assoc 'lineEnt seg))
+                  breakEnts (cdr (assoc 'breakEnts seg))
+                  dimEnt   (cdr (assoc 'dimEnt seg))
+            )
+
+            ;; move current entities first so chain continuity is preserved
+            (move-entity-by-delta lineEnt cumDelta)
+            (move-breaks-by-delta breakEnts cumDelta)
+            (move-entity-by-delta dimEnt cumDelta)
+
+            ;; refresh live endpoints after movement
+            (setq ed (and lineEnt (entget lineEnt))
+                  p1 (and ed (cdr (assoc 10 ed)))
+                  p2 (and ed (cdr (assoc 11 ed)))
+            )
+            (if p1 (setq seg (subst (cons 'p1 p1) (assoc 'p1 seg) seg)))
+            (if p2 (setq seg (subst (cons 'p2 p2) (assoc 'p2 seg) seg)))
+
+            (setq userVal (cdr (assoc 'userLen seg)))
+            (setq len (distance p1 p2))
+            (setq targetDrawLen (* userVal scaleFactor))
+
+            (if (and lineEnt p1 p2
+                     (not (cdr (assoc 'shortened seg)))
+                     (> targetDrawLen 0.0)
+                     (> (abs (- targetDrawLen len)) 1e-6)
+                )
+              (progn
+                (setq oldEnd p2
+                      ang (angle p1 p2)
+                      newEnd (polar p1 ang targetDrawLen)
+                      deltaShort (sub-pts newEnd oldEnd)
+                )
+                (if (assoc 11 ed)
+                  (progn
+                    (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
+                    (entmod ed)
+                    (entupd lineEnt)
+                    (setq seg (subst (cons 'p2 newEnd) (assoc 'p2 seg) seg))
+                    (setq seg (subst (cons 'drawLen targetDrawLen) (assoc 'drawLen seg) seg))
+                    (setq cumDelta (add-delta cumDelta deltaShort))
+                  )
+                )
+              )
+            )
+            (setq newStack (cons seg newStack))
+          )
+          (setq segStack newStack)
         )
       )
 

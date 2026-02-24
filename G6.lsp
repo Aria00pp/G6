@@ -6,7 +6,7 @@
                 sel chosenEnts i entSel chosenEntsOrdered orderedSegs
                 curRec seekSeg oldStart oldEnd capDraw liveP1 liveP2 liveAng newEnd delta
                 adjMap moveSegs moveRec moveEnt moveEd moveP1 moveP2 newP1 newP2
-                updates updPair stackOut stackRec movedAny maxTyped
+                updates updPair stackOut stackRec movedAny maxTyped eligibleCount
                 ed p1 p2 mid ang nAng dimPt)
 
   ;;------------------------------------------------------------
@@ -361,6 +361,7 @@
 
               (setq segStack (refresh-seg-endpoints segStack))
               (setq eligibleEnts '()
+                    eligibleCount 0
                     tmpSegList   segStack
                     maxTyped     0.0
               )
@@ -372,20 +373,23 @@
                   (setq maxTyped (cdr (assoc 'userLen tmpRec)))
                 )
                 (if (> (cdr (assoc 'userLen tmpRec)) threshold)
-                  (setq eligibleEnts (cons (cdr (assoc 'lineEnt tmpRec)) eligibleEnts))
+                  (progn
+                    (setq eligibleEnts (cons (cdr (assoc 'lineEnt tmpRec)) eligibleEnts))
+                    (setq eligibleCount (1+ eligibleCount))
+                  )
                 )
               )
 
               (prompt
                 (strcat
                   "\nG6 shorten: eligible="
-                  (itoa (length eligibleEnts))
+                  (itoa eligibleCount)
                   ", maxTyped="
                   (rtos maxTyped 2 2)
                 )
               )
 
-              (if eligibleEnts
+              (if (> eligibleCount 0)
                 (progn
                   (prompt "\nSelect eligible LINE objects to shorten.")
                   (setq sel (ssget "_:L" '((0 . "LINE"))))

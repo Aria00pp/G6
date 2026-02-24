@@ -6,7 +6,7 @@
                 lineEnt breakEnts oldEnd targetDrawLen newEnd deltaShort
                 dimEnt dimEd dimTxt assignAns chosenLayer keepAssign
                 selCount selIdx pickEnt segMatch lyrNames lyrIdx lyrRec
-                dclPath dclFd dclId dclResult dclSel)
+                dclPath dclFd dclId dclResult dclSel segMap errnoVal)
 
   ;;------------------------------------------------------------
   ;; Error handler: restore system variables
@@ -135,10 +135,10 @@
           rec (tblnext "LAYER" T)
     )
     (while rec
-      (setq out (append out (list (cdr (assoc 2 rec)))))
+      (setq out (cons (cdr (assoc 2 rec)) out))
       (setq rec (tblnext "LAYER"))
     )
-    out
+    (reverse out)
   )
 
   (defun choose-layer-dialog (layers / result)
@@ -559,47 +559,52 @@
         )
       )
 
-      (initget "Yes No")
-      (setq assignAns (getkword "\nAssign layers to lines and dimensions? [Yes/No] <No>: "))
-      (if (= assignAns "Yes")
+      (if segStack
         (progn
-          (setq lyrNames (collect-layer-names)
-                keepAssign T
-          )
-          (while (and keepAssign lyrNames)
-            (setq chosenLayer (choose-layer-dialog lyrNames))
-            (if (not chosenLayer)
-              (setq keepAssign nil)
-              (progn
-                (setq sel (ssget '((0 . "LINE"))))
-                (if sel
+          (initget "Yes No")
+          (setq assignAns (getkword "\nAssign layers to lines and dimensions? [Yes/No] <No>: "))
+          (if (= assignAns "Yes")
+            (progn
+              (setq lyrNames (collect-layer-names)
+                    keepAssign T
+                    segMap '()
+              )
+              (foreach seg segStack
+                (setq segMap (cons (cons (cdr (assoc 'lineEnt seg)) seg) segMap))
+              )
+              (while (and keepAssign lyrNames)
+                (setq chosenLayer (choose-layer-dialog lyrNames))
+                (if (not chosenLayer)
+                  (setq keepAssign nil)
                   (progn
-                    (setq selCount (sslength sel)
-                          selIdx 0
-                    )
-                    (while (< selIdx selCount)
-                      (setq pickEnt (ssname sel selIdx)
-                            segMatch nil
-                            segList segStack
-                      )
-                      (while (and segList (not segMatch))
-                        (setq seg (car segList)
-                              segList (cdr segList)
-                        )
-                        (if (= pickEnt (cdr (assoc 'lineEnt seg)))
-                          (setq segMatch seg)
+                    (setq sel (ssget '((0 . "LINE"))))
+                    (if (not sel)
+                      (progn
+                        (setq errnoVal (getvar "ERRNO"))
+                        (if (= errnoVal 52)
+                          (setq keepAssign nil)
                         )
                       )
-                      (if segMatch
-                        (progn
-                          (set-entity-layer (cdr (assoc 'lineEnt segMatch)) chosenLayer)
-                          (foreach e (rm-nil (cdr (assoc 'breakEnts segMatch)))
-                            (set-entity-layer e chosenLayer)
+                      (progn
+                        (setq selCount (sslength sel)
+                              selIdx 0
+                        )
+                        (while (< selIdx selCount)
+                          (setq pickEnt (ssname sel selIdx)
+                                segMatch (assoc pickEnt segMap)
                           )
-                          (set-entity-layer (cdr (assoc 'dimEnt segMatch)) chosenLayer)
+                          (if segMatch
+                            (progn
+                              (set-entity-layer (cdr (assoc 'lineEnt (cdr segMatch))) chosenLayer)
+                              (foreach be (rm-nil (cdr (assoc 'breakEnts (cdr segMatch))))
+                                (set-entity-layer be chosenLayer)
+                              )
+                              (set-entity-layer (cdr (assoc 'dimEnt (cdr segMatch))) chosenLayer)
+                            )
+                          )
+                          (setq selIdx (1+ selIdx))
                         )
                       )
-                      (setq selIdx (1+ selIdx))
                     )
                   )
                 )

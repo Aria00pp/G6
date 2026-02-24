@@ -527,7 +527,7 @@
                       (setq curStr (rtos curNum 2 8))
                     )
                     (setq editStr (getstring T (strcat "\nNew typed length for selected segment <" curStr ">: ")))
-                    (if (/= editStr "")
+                    (if (and editStr (> (strlen editStr) 0))
                       (progn
                         (setq seg (subst (cons 'userLenStr editStr) (assoc 'userLenStr seg) seg))
                         (setq seg (subst (cons 'userLen (abs (atof editStr))) (assoc 'userLen seg) seg))
@@ -536,11 +536,17 @@
                         (setq dimEnt (cdr (assoc 'dimEnt seg)))
                         (if dimEnt
                           (progn
+                            (setq userVal (cdr (assoc 'userLen seg))
+                                  userLen (cdr (assoc 'userLenStr seg))
+                            )
+                            (if (or (not userLen) (= userLen ""))
+                              (setq userLen (rtos userVal 2 8))
+                            )
                             (setq dimEd (entget dimEnt)
                                   chosenLayer (if dimEd (cdr (assoc 8 dimEd)) nil)
                                   dimTxt (if chosenLayer (g6-get-sfx chosenLayer) "")
                             )
-                            (set-dim-override-text dimEnt (strcat editStr dimTxt))
+                            (set-dim-override-text dimEnt (strcat userLen dimTxt))
                           )
                         )
                       )

@@ -6,6 +6,7 @@
                 sel chosenEnts i entSel chosenEntsOrdered orderedSegs
                 curRec seekSeg oldStart oldEnd capDraw liveP1 liveP2 liveAng newEnd delta
                 adjMap moveSegs moveRec moveEnt moveEd moveP1 moveP2 newP1 newP2
+                updates updPair stackOut stackRec movedAny
                 ed p1 p2 mid ang nAng dimPt)
 
   ;;------------------------------------------------------------
@@ -428,47 +429,93 @@
 
                         (if curRec
                           (progn
-                            (setq ed        (entget entSel)
-                                  liveP1    (cdr (assoc 10 ed))
-                                  liveP2    (cdr (assoc 11 ed))
-                                  oldStart  liveP1
-                                  oldEnd    liveP2
-                                  capDraw   (* capLen scaleFactor)
-                                  liveAng   (angle liveP1 liveP2)
-                                  newEnd    (polar liveP1 liveAng capDraw)
-                                  delta     (pt- newEnd oldEnd)
-                            )
+                            (setq ed (entget entSel))
+                            (if ed
+                              (progn
+                                (setq liveP1    (cdr (assoc 10 ed))
+                                      liveP2    (cdr (assoc 11 ed))
+                                )
+                                (if (and liveP1 liveP2)
+                                  (progn
+                                    (setq oldStart  liveP1
+                                          oldEnd    liveP2
+                                          capDraw   (* capLen scaleFactor)
+                                          liveAng   (angle liveP1 liveP2)
+                                          newEnd    (polar liveP1 liveAng capDraw)
+                                          delta     (pt- newEnd oldEnd)
+                                    )
 
-                            (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
-                            (entmod ed)
-                            (entupd entSel)
+                                    (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
+                                    (entmod ed)
+                                    (entupd entSel)
 
-                            (setq curRec (rec-set curRec 'p2 newEnd))
-                            (setq curRec (rec-set curRec 'drawLen capDraw))
-                            (setq curRec (rec-set curRec 'shortened T))
-                            (setq segStack (update-seg-in-stack segStack entSel curRec))
+                                    (setq curRec (rec-set curRec 'p2 newEnd))
+                                    (setq curRec (rec-set curRec 'drawLen capDraw))
+                                    (setq curRec (rec-set curRec 'shortened T))
+                                    (setq segStack (update-seg-in-stack segStack entSel curRec))
 
-                            (setq segStack (refresh-seg-endpoints segStack))
-                            (setq adjMap   (build-adj-map segStack))
-                            (setq moveSegs (downstream-segs adjMap oldEnd entSel))
+                                    (if (not (equal newEnd oldEnd 1e-12))
+                                      (progn
+                                        (setq segStack (refresh-seg-endpoints segStack))
+                                        (setq adjMap   (build-adj-map segStack))
+                                        (setq moveSegs (downstream-segs adjMap oldEnd entSel))
+                                        (setq updates  '())
+                                        (setq movedAny nil)
 
-                            (while moveSegs
-                              (setq moveRec  (car moveSegs)
-                                    moveSegs (cdr moveSegs)
-                                    moveEnt  (cdr (assoc 'lineEnt moveRec))
-                                    moveEd   (entget moveEnt)
-                                    moveP1   (cdr (assoc 10 moveEd))
-                                    moveP2   (cdr (assoc 11 moveEd))
-                                    newP1    (pt+ moveP1 delta)
-                                    newP2    (pt+ moveP2 delta)
+                                        (while moveSegs
+                                          (setq moveRec  (car moveSegs)
+                                                moveSegs (cdr moveSegs)
+                                                moveEnt  (cdr (assoc 'lineEnt moveRec))
+                                                moveEd   (and moveEnt (entget moveEnt))
+                                          )
+                                          (if moveEd
+                                            (progn
+                                              (setq moveP1 (cdr (assoc 10 moveEd))
+                                                    moveP2 (cdr (assoc 11 moveEd))
+                                              )
+                                              (if (and moveP1 moveP2)
+                                                (progn
+                                                  (setq newP1 (pt+ moveP1 delta)
+                                                        newP2 (pt+ moveP2 delta)
+                                                  )
+                                                  (setq moveEd (subst (cons 10 newP1) (assoc 10 moveEd) moveEd))
+                                                  (setq moveEd (subst (cons 11 newP2) (assoc 11 moveEd) moveEd))
+                                                  (entmod moveEd)
+                                                  (entupd moveEnt)
+                                                  (setq updates  (cons (cons moveEnt (list newP1 newP2)) updates))
+                                                  (setq movedAny T)
+                                                )
+                                              )
+                                            )
+                                          )
+                                        )
+
+                                        (if movedAny
+                                          (progn
+                                            (setq stackOut '()
+                                                  tmpSegList segStack
+                                            )
+                                            (while tmpSegList
+                                              (setq stackRec   (car tmpSegList)
+                                                    tmpSegList (cdr tmpSegList)
+                                                    updPair    (assoc (cdr (assoc 'lineEnt stackRec)) updates)
+                                              )
+                                              (if updPair
+                                                (progn
+                                                  (setq stackRec (rec-set stackRec 'p1 (car (cdr updPair))))
+                                                  (setq stackRec (rec-set stackRec 'p2 (cadr (cdr updPair))))
+                                                )
+                                              )
+                                              (setq stackOut (cons stackRec stackOut))
+                                            )
+                                            (setq segStack (reverse stackOut))
+                                          )
+                                        )
+                                      )
+                                    )
+                                  )
+                                )
                               )
-                              (setq moveEd (subst (cons 10 newP1) (assoc 10 moveEd) moveEd))
-                              (setq moveEd (subst (cons 11 newP2) (assoc 11 moveEd) moveEd))
-                              (entmod moveEd)
-                              (entupd moveEnt)
-                              (setq moveRec (rec-set moveRec 'p1 newP1))
-                              (setq moveRec (rec-set moveRec 'p2 newP2))
-                              (setq segStack (update-seg-in-stack segStack moveEnt moveRec))
                             )
                           )
                         )

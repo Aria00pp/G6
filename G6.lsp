@@ -607,7 +607,7 @@
 
 ;;; ------------------------------------------------------------
 ;;; Break map helpers
-;;; breakMap: alist (lineEnt . (bar1Ent bar2Ent))
+;;; breakMap: alist (lineEnt . (bar1Ent bar2Ent tailEnt))
 ;;; ------------------------------------------------------------
 (defun g6:deleteBreaks (breakMap / pair ents)
   (while breakMap
@@ -722,6 +722,7 @@
                dimOff dimOk dimEnts dimMap dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV
                layAns lay suf againAns selSS j eSel idxSel brkPair dimE txtOvr
                brkAns brkSS eligibleSS entCandidate brkParams gapW barH bars
+               oldTail oldTailEd oldTailEnd oldLineEd g1 g2 tailEnt lay
                )
 
   (defun *error* (msg)
@@ -937,10 +938,50 @@
                       (while (< j (sslength eligibleSS))
                         (setq eSel (ssname eligibleSS j))
                         (setq brkPair (assoc eSel breakMap))
-                        (if brkPair (foreach be (cdr brkPair) (if (and be (entget be)) (entdel be))))
-                        (setq bars (g6:createBreakerBars eSel gapW barH))
-                        (if bars
+                        (if brkPair
                           (progn
+                            (setq oldTail (nth 2 (cdr brkPair)))
+                            (if (and oldTail (entget oldTail))
+                              (progn
+                                (setq oldTailEd (entget oldTail)
+                                      oldTailEnd (cdr (assoc 11 oldTailEd))
+                                      oldLineEd (entget eSel))
+                                (if (and oldTailEnd oldLineEd (assoc 11 oldLineEd))
+                                  (progn
+                                    (setq oldLineEd (subst (cons 11 oldTailEnd) (assoc 11 oldLineEd) oldLineEd))
+                                    (entmod oldLineEd)
+                                    (entupd eSel)
+                                  )
+                                )
+                              )
+                            )
+                            (foreach be (cdr brkPair) (if (and be (entget be)) (entdel be)))
+                          )
+                        )
+
+                        (setq ed (entget eSel)
+                              p1 (cdr (assoc 10 ed))
+                              p2 (cdr (assoc 11 ed))
+                              lay (cdr (assoc 8 ed)))
+                        (if (null lay) (setq lay "0"))
+
+                        (if (and p1 p2)
+                          (progn
+                            (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
+                                  ang (angle p1 p2)
+                                  g1 (polar mid (+ ang pi) (/ gapW 2.0))
+                                  g2 (polar mid ang (/ gapW 2.0)))
+
+                            (setq bars (g6:createBreakerBars eSel gapW barH))
+
+                            (setq ed (subst (cons 11 g1) (assoc 11 ed) ed))
+                            (entmod ed)
+                            (entupd eSel)
+
+                            (setq tailEnt (entmakex (list (cons 0 "LINE") (cons 8 lay) (cons 10 g2) (cons 11 p2))))
+
+                            (if (null bars) (setq bars (list nil nil)))
+                            (setq bars (append bars (list tailEnt)))
                             (if brkPair
                               (setq breakMap (subst (cons eSel bars) brkPair breakMap))
                               (setq breakMap (cons (cons eSel bars) breakMap))
@@ -980,7 +1021,16 @@
                     (progn
                       (setq ed (entget e)
                             p1 (cdr (assoc 10 ed))
-                            p2 (cdr (assoc 11 ed)))
+                            p2 (cdr (assoc 11 ed))
+                            brkPair (assoc e breakMap))
+                      (if brkPair
+                        (progn
+                          (setq tailEnt (nth 2 (cdr brkPair)))
+                          (if (and tailEnt (entget tailEnt))
+                            (setq p2 (cdr (assoc 11 (entget tailEnt))))
+                          )
+                        )
+                      )
                       (if (and p1 p2)
                         (progn
                           (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2))

@@ -6,7 +6,7 @@
                 sel chosenEnts i entSel chosenEntsOrdered orderedSegs
                 curRec seekSeg oldStart oldEnd capDraw liveP1 liveP2 liveAng newEnd delta
                 adjMap moveSegs moveRec moveEnt moveEd moveP1 moveP2 newP1 newP2
-                updates updPair stackOut stackRec movedAny
+                updates updPair stackOut stackRec movedAny maxTyped
                 ed p1 p2 mid ang nAng dimPt)
 
   ;;------------------------------------------------------------
@@ -362,20 +362,33 @@
               (setq segStack (refresh-seg-endpoints segStack))
               (setq eligibleEnts '()
                     tmpSegList   segStack
+                    maxTyped     0.0
               )
               (while tmpSegList
                 (setq tmpRec    (car tmpSegList)
                       tmpSegList (cdr tmpSegList)
+                )
+                (if (> (cdr (assoc 'userLen tmpRec)) maxTyped)
+                  (setq maxTyped (cdr (assoc 'userLen tmpRec)))
                 )
                 (if (> (cdr (assoc 'userLen tmpRec)) threshold)
                   (setq eligibleEnts (cons (cdr (assoc 'lineEnt tmpRec)) eligibleEnts))
                 )
               )
 
+              (prompt
+                (strcat
+                  "\nG6 shorten: eligible="
+                  (itoa (length eligibleEnts))
+                  ", maxTyped="
+                  (rtos maxTyped 2 2)
+                )
+              )
+
               (if eligibleEnts
                 (progn
                   (prompt "\nSelect eligible LINE objects to shorten.")
-                  (setq sel (ssget '((0 . "LINE"))))
+                  (setq sel (ssget "_:L" '((0 . "LINE"))))
                   (setq chosenEnts '())
                   (if sel
                     (progn
@@ -391,6 +404,7 @@
                         )
                       )
                     )
+                    (prompt "\nNo lines selected.")
                   )
 
                   (if chosenEnts
@@ -521,8 +535,10 @@
                         )
                       )
                     )
+                    (prompt "\nNo eligible lines selected.")
                   )
                 )
+                (prompt "\nNo lines in this run exceed the threshold.")
               )
             )
           )

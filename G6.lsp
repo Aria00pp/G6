@@ -1,7 +1,10 @@
 (defun c:G6 ( / pt angList idx done lenStr len gr key nextpt
                 prevPt2 lastLen finishedInput segStack
                 scaleFactor oldOsmode oldCmdecho *error* dimOff
-                userLen userVal seg segList e ed p1 p2 mid ang nAng dimPt)
+                userLen userVal seg segList e ed p1 p2 mid ang nAng dimPt
+                ans ss i selEnts targetDrawLen cumDelta newSegs delta segRec
+                breakGap breakHalf marker1 marker2 along1 along2 perp pA pB
+                shortenedP2 deltaShort dimStr dimEnt)
 
   ;;------------------------------------------------------------
   ;; Error handler: restore system variables
@@ -24,10 +27,44 @@
   (setvar "CMDECHO" 0)
 
   ;;------------------------------------------------------------
-  ;; degree <-> radian helpers
+  ;; helper functions
   ;;------------------------------------------------------------
   (defun deg->rad (d) (* pi (/ d 180.0)))
   (defun rad->deg (r) (* 180.0 (/ r pi)))
+
+  (defun v+ (a b) (mapcar '+ a b))
+  (defun v- (a b) (mapcar '- a b))
+  (defun v* (s v) (mapcar '(lambda (x) (* s x)) v))
+
+  (defun move-line-by-delta (ent d / ed p10 p11)
+    (if (and ent d)
+      (progn
+        (setq ed (entget ent)
+              p10 (cdr (assoc 10 ed))
+              p11 (cdr (assoc 11 ed))
+        )
+        (if (and p10 p11)
+          (progn
+            (setq ed (subst (cons 10 (v+ p10 d)) (assoc 10 ed) ed))
+            (setq ed (subst (cons 11 (v+ p11 d)) (assoc 11 ed) ed))
+            (entmod ed)
+            (entupd ent)
+          )
+        )
+      )
+    )
+  )
+
+  (defun seg-selected-p (ent picked / found)
+    (setq found nil)
+    (while (and picked (not found))
+      (if (= ent (car picked))
+        (setq found T)
+      )
+      (setq picked (cdr picked))
+    )
+    found
+  )
 
   ;; allowed angles: 30, 90, 150, -150, -90, -30
   (setq angList (mapcar 'deg->rad '(30 90 150 -150 -90 -30)))
@@ -142,6 +179,9 @@
                           (cons 'lineEnt (entlast))
                           (cons 'drawLen len)
                           (cons 'userLen userLen)
+                          (cons 'userLenStr lenStr)
+                          (cons 'shortened nil)
+                          (cons 'breakEnts nil)
                           (cons 'dimEnt nil)
                         )
                         segStack
@@ -244,9 +284,134 @@
       )
 
       ;;--------------------------------------------------------
-      ;; After drawing: restore OSNAP first, then manage dimensions
+      ;; After drawing: restore OSNAP first, then optional shorten + dimensions
       ;;--------------------------------------------------------
       (setvar "OSMODE" oldOsmode)
+
+      ;; Ask whether to shorten long lines
+      (if segStack
+        (progn
+          (initget "Yes No")
+          (setq ans (getkword "\nShorten selected long lines to 150? [Yes/No] <No>: "))
+          (if (= ans "Yes")
+            (progn
+              (setq ss (ssget '((0 . "LINE"))))
+              (if ss
+                (progn
+                  (setq selEnts '()
+                        i 0
+                  )
+                  (while (< i (sslength ss))
+                    (setq selEnts (cons (ssname ss i) selEnts)
+                          i (1+ i)
+                    )
+                  )
+
+                  (setq targetDrawLen (* scaleFactor 150.0)
+                        cumDelta      '(0.0 0.0 0.0)
+                        segList       (reverse segStack)
+                        newSegs       '()
+                        breakGap      0.12
+                        breakHalf     0.08
+                  )
+
+                  (while segList
+                    (setq seg     (car segList)
+                          segList (cdr segList)
+                    )
+
+                    ;; move this segment (and markers) by accumulated delta
+                    (if cumDelta
+                      (progn
+                        (move-line-by-delta (cdr (assoc 'lineEnt seg)) cumDelta)
+                        (foreach e (cdr (assoc 'breakEnts seg))
+                          (move-line-by-delta e cumDelta)
+                        )
+                      )
+                    )
+
+                    ;; refresh endpoints after translation
+                    (setq e  (cdr (assoc 'lineEnt seg))
+                          ed (and e (entget e))
+                          p1 (and ed (cdr (assoc 10 ed)))
+                          p2 (and ed (cdr (assoc 11 ed)))
+                    )
+
+                    ;; shorten selected long segments that belong to this command
+                    (if (and p1 p2
+                             (seg-selected-p e selEnts)
+                             (> (cdr (assoc 'userLen seg)) 150.0)
+                        )
+                      (progn
+                        (setq ang        (angle p1 p2)
+                              shortenedP2 (polar p1 ang targetDrawLen)
+                              deltaShort  (v- shortenedP2 p2)
+                        )
+
+                        ;; set new end point (keep start fixed)
+                        (setq ed (subst (cons 11 shortenedP2) (assoc 11 ed) ed))
+                        (entmod ed)
+                        (entupd e)
+
+                        ;; create simple || marker near midpoint
+                        (setq mid   (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 shortenedP2)
+                              along1 (polar mid ang (* -0.5 breakGap))
+                              along2 (polar mid ang (*  0.5 breakGap))
+                              perp   (+ ang (/ pi 2.0))
+                              pA     (polar along1 perp breakHalf)
+                              pB     (polar along1 perp (- breakHalf))
+                              marker1
+                                (entmakex
+                                  (list
+                                    '(0 . "LINE")
+                                    (cons 10 pA)
+                                    (cons 11 pB)
+                                  )
+                                )
+                              pA     (polar along2 perp breakHalf)
+                              pB     (polar along2 perp (- breakHalf))
+                              marker2
+                                (entmakex
+                                  (list
+                                    '(0 . "LINE")
+                                    (cons 10 pA)
+                                    (cons 11 pB)
+                                  )
+                                )
+                        )
+
+                        (setq seg (subst (cons 'p1 p1) (assoc 'p1 seg) seg))
+                        (setq seg (subst (cons 'p2 shortenedP2) (assoc 'p2 seg) seg))
+                        (setq seg (subst (cons 'drawLen targetDrawLen) (assoc 'drawLen seg) seg))
+                        (setq seg (subst (cons 'shortened T) (assoc 'shortened seg) seg))
+                        (setq seg (subst (cons 'breakEnts (vl-remove nil (list marker1 marker2))) (assoc 'breakEnts seg) seg))
+
+                        ;; subsequent connected segments must follow
+                        (setq cumDelta (v+ cumDelta deltaShort))
+                      )
+                      (progn
+                        ;; keep segment endpoints synchronized if only translated
+                        (if (and p1 p2)
+                          (progn
+                            (setq seg (subst (cons 'p1 p1) (assoc 'p1 seg) seg))
+                            (setq seg (subst (cons 'p2 p2) (assoc 'p2 seg) seg))
+                          )
+                        )
+                      )
+                    )
+
+                    (setq newSegs (cons seg newSegs))
+                  )
+
+                  ;; restore stack newest-first
+                  (setq segStack newSegs)
+                  (command "_.REGEN")
+                )
+              )
+            )
+          )
+        )
+      )
 
       ;; Ask for dimension offset and create aligned dimensions
       (if segStack
@@ -255,7 +420,9 @@
           (if dimOff
             (progn
               ;; walk segments in draw order
-              (setq segList (reverse segStack))
+              (setq segList (reverse segStack)
+                    newSegs '()
+              )
               (while segList
                 (setq seg     (car segList)
                       segList (cdr segList)
@@ -285,11 +452,30 @@
                         )
                         ;; create aligned dimension
                         (command "_.DIMALIGNED" p1 p2 dimPt "")
+                        (setq dimEnt (entlast))
+                        (if (and (cdr (assoc 'shortened seg)) dimEnt)
+                          (progn
+                            (setq dimStr (cdr (assoc 'userLenStr seg)))
+                            (if (or (not dimStr) (= dimStr ""))
+                              (setq dimStr (rtos userVal 2 8))
+                            )
+                            (setq ed (entget dimEnt))
+                            (if (assoc 1 ed)
+                              (setq ed (subst (cons 1 dimStr) (assoc 1 ed) ed))
+                              (setq ed (append ed (list (cons 1 dimStr))))
+                            )
+                            (entmod ed)
+                            (entupd dimEnt)
+                          )
+                        )
+                        (setq seg (subst (cons 'dimEnt dimEnt) (assoc 'dimEnt seg) seg))
                       )
                     )
                   )
                 )
+                (setq newSegs (cons seg newSegs))
               )
+              (setq segStack newSegs)
             )
           )
         )

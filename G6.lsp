@@ -1372,11 +1372,15 @@
 
                   (if shortTargets
                     (progn
-                      (setq brkParams (g6:breakParamsDefault)
-                            gapW (nth 0 brkParams)
-                            barH (nth 1 brkParams))
-                      (foreach shortEnt shortTargets
-                        (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH))
+                      (setq brkParams (g6:pickBreakParams (car shortTargets) (g6:breakParamsDefault)))
+                      (if brkParams
+                        (progn
+                          (setq gapW (nth 0 brkParams)
+                                barH (nth 1 brkParams))
+                          (foreach shortEnt shortTargets
+                            (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH))
+                          )
+                        )
                       )
                     )
                   )

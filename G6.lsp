@@ -817,6 +817,17 @@
   (reverse out)
 )
 
+
+(defun g6:endpointsFromLineRecs (lineRecs / out rec)
+  ;; returns list of pt3 endpoints from current recs
+  (setq out '())
+  (foreach rec lineRecs
+    (setq out (cons (g6:pt3 (cadr rec)) out)
+          out (cons (g6:pt3 (caddr rec)) out))
+  )
+  (reverse out)
+)
+
 (defun g6:queueHasNearPoint (pts pt tol / found)
   (setq found nil)
   (while (and pts (null found))
@@ -1290,9 +1301,8 @@
               (if (null shortOrder)
                 (prompt "\nNo eligible long lines selected from this G6 run.")
                 (progn
-                  (setq shortRecs (g6:buildLineRecords entList)
-                        shortEndpoints (cadr shortRecs)
-                        shortRecs (car shortRecs))
+                  (setq shortRecs (car (g6:buildLineRecords entList))
+                        shortEndpoints (g6:endpointsFromLineRecs shortRecs))
                   (foreach shortEnt shortOrder
                     (if (and shortEnt (entget shortEnt))
                       (progn
@@ -1311,6 +1321,7 @@
                                 (entupd shortEnt)
 
                                 (setq shortRecs (g6:updateLineRecord shortRecs shortEnt anchor newEnd))
+                                (setq shortEndpoints (g6:endpointsFromLineRecs shortRecs))
                                 (setq shortMoved (g6:collectDownstreamLines shortRecs shortEndpoints shortEnt oldEnd anchor tol))
                                 (foreach moveEnt shortMoved
                                   (if (and moveEnt (entget moveEnt))

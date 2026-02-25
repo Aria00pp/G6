@@ -783,8 +783,9 @@
       (g6:pointOnSegment pt p1 p2 tol))
 )
 
-(defun g6:buildLineRecords (entList / out e ed p1 p2)
-  (setq out '())
+(defun g6:buildLineRecords (entList / lineRecs endpoints e ed p1 p2)
+  (setq lineRecs '()
+        endpoints '())
   (foreach e entList
     (if (and e (entget e))
       (progn
@@ -792,23 +793,28 @@
               p1 (cdr (assoc 10 ed))
               p2 (cdr (assoc 11 ed)))
         (if (and p1 p2)
-          (setq out (append out (list (list e p1 p2))))
+          (progn
+            (setq p1 (g6:pt3 p1)
+                  p2 (g6:pt3 p2)
+                  lineRecs (cons (list e p1 p2) lineRecs)
+                  endpoints (cons p1 (cons p2 endpoints)))
+          )
         )
       )
     )
   )
-  out
+  (list (reverse lineRecs) (reverse endpoints))
 )
 
 (defun g6:updateLineRecord (recs ent newP1 newP2 / out rec)
   (setq out '())
   (foreach rec recs
     (if (eq (car rec) ent)
-      (setq out (append out (list (list ent newP1 newP2))))
-      (setq out (append out (list rec)))
+      (setq out (cons (list ent newP1 newP2) out))
+      (setq out (cons rec out))
     )
   )
-  out
+  (reverse out)
 )
 
 (defun g6:queueHasNearPoint (pts pt tol / found)
@@ -820,34 +826,43 @@
   found
 )
 
-(defun g6:collectDownstreamLines (lineRecs srcEnt startPt tol / queue seenPts moved rec ent p1 p2 pt)
+(defun g6:collectDownstreamLines (lineRecs endpoints srcEnt startPt anchorPt tol / queue seenPts moved rec ent p1 p2 pt ep)
   (setq queue (list (g6:pt3 startPt))
         seenPts '()
         moved '())
   (while queue
     (setq pt (car queue)
           queue (cdr queue))
-    (if (not (g6:queueHasNearPoint seenPts pt tol))
-      (progn
-        (setq seenPts (cons pt seenPts))
-        (foreach rec lineRecs
-          (setq ent (car rec)
-                p1 (cadr rec)
-                p2 (caddr rec))
-          (if (and (not (eq ent srcEnt))
-                   (not (member ent moved))
-                   (g6:connectedToPoint rec pt tol))
-            (progn
-              (setq moved (append moved (list ent)))
-              (if (not (g6:queueHasNearPoint seenPts p1 tol)) (setq queue (append queue (list p1))))
-              (if (not (g6:queueHasNearPoint seenPts p2 tol)) (setq queue (append queue (list p2))))
+    (if (not (g6:ptNear pt anchorPt tol))
+      (if (not (g6:queueHasNearPoint seenPts pt tol))
+        (progn
+          (setq seenPts (cons pt seenPts))
+          (foreach rec lineRecs
+            (setq ent (car rec)
+                  p1 (cadr rec)
+                  p2 (caddr rec))
+            (if (and (not (eq ent srcEnt))
+                     (not (member ent moved))
+                     (g6:connectedToPoint rec pt tol))
+              (progn
+                (setq moved (cons ent moved))
+                (if (and (not (g6:ptNear p1 anchorPt tol)) (not (g6:queueHasNearPoint seenPts p1 tol))) (setq queue (cons p1 queue)))
+                (if (and (not (g6:ptNear p2 anchorPt tol)) (not (g6:queueHasNearPoint seenPts p2 tol))) (setq queue (cons p2 queue)))
+                (foreach ep endpoints
+                  (if (and (not (g6:ptNear ep anchorPt tol))
+                           (not (g6:queueHasNearPoint seenPts ep tol))
+                           (g6:pointOnSegment ep p1 p2 tol))
+                    (setq queue (cons ep queue))
+                  )
+                )
+              )
             )
           )
         )
       )
     )
   )
-  moved
+  (reverse moved)
 )
 
 (defun g6:moveDimEntity (dimEnt delta / ss base to)
@@ -1048,7 +1063,7 @@
                layAns lay suf againAns selSS j eSel idxSel brkPair dimE txtOvr
                brkAns brkSS eligibleSS entCandidate brkParams gapW barH bars
                resolvedSel
-               shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs
+               shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
                shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2
                )
 
@@ -1275,7 +1290,9 @@
               (if (null shortOrder)
                 (prompt "\nNo eligible long lines selected from this G6 run.")
                 (progn
-                  (setq shortRecs (g6:buildLineRecords entList))
+                  (setq shortRecs (g6:buildLineRecords entList)
+                        shortEndpoints (cadr shortRecs)
+                        shortRecs (car shortRecs))
                   (foreach shortEnt shortOrder
                     (if (and shortEnt (entget shortEnt))
                       (progn
@@ -1294,7 +1311,7 @@
                                 (entupd shortEnt)
 
                                 (setq shortRecs (g6:updateLineRecord shortRecs shortEnt anchor newEnd))
-                                (setq shortMoved (g6:collectDownstreamLines shortRecs shortEnt oldEnd tol))
+                                (setq shortMoved (g6:collectDownstreamLines shortRecs shortEndpoints shortEnt oldEnd anchor tol))
                                 (foreach moveEnt shortMoved
                                   (if (and moveEnt (entget moveEnt))
                                     (progn

@@ -412,6 +412,66 @@
   )
 )
 
+(defun g6:applyBreakerToLine (eSel breakMap gapW barH / brkPair oldTail oldTailEd oldTailEnd oldLineEd ed p1 p2 lay lineLen gapUse mid ang g1 g2 bars tailEnt be)
+  (setq brkPair (assoc eSel breakMap))
+  (if brkPair
+    (progn
+      (setq oldTail (nth 2 (cdr brkPair)))
+      (if (and oldTail (entget oldTail))
+        (progn
+          (setq oldTailEd (entget oldTail)
+                oldTailEnd (cdr (assoc 11 oldTailEd))
+                oldLineEd (entget eSel))
+          (if (and oldTailEnd oldLineEd (assoc 11 oldLineEd))
+            (progn
+              (setq oldLineEd (subst (cons 11 oldTailEnd) (assoc 11 oldLineEd) oldLineEd))
+              (entmod oldLineEd)
+              (entupd eSel)
+            )
+          )
+        )
+      )
+      (foreach be (cdr brkPair) (if (and be (entget be)) (entdel be)))
+    )
+  )
+
+  (setq ed (entget eSel)
+        p1 (cdr (assoc 10 ed))
+        p2 (cdr (assoc 11 ed))
+        lay (cdr (assoc 8 ed)))
+  (if (null lay) (setq lay "0"))
+
+  (if (and p1 p2)
+    (progn
+      (setq lineLen (distance p1 p2)
+            gapUse gapW)
+      (if (>= gapUse lineLen)
+        (setq gapUse (max 0.001 (* 0.5 lineLen)))
+      )
+      (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
+            ang (angle p1 p2)
+            g1 (polar mid (+ ang pi) (/ gapUse 2.0))
+            g2 (polar mid ang (/ gapUse 2.0)))
+
+      (setq bars (g6:createBreakerBars eSel gapUse barH))
+
+      (setq ed (subst (cons 11 g1) (assoc 11 ed) ed))
+      (entmod ed)
+      (entupd eSel)
+
+      (setq tailEnt (entmakex (list (cons 0 "LINE") (cons 8 lay) (cons 10 g2) (cons 11 p2))))
+
+      (if (null bars) (setq bars (list nil nil)))
+      (setq bars (append bars (list tailEnt)))
+      (if brkPair
+        (setq breakMap (subst (cons eSel bars) brkPair breakMap))
+        (setq breakMap (cons (cons eSel bars) breakMap))
+      )
+    )
+  )
+  breakMap
+)
+
 ;;; ------------------------------------------------------------
 ;;; DIM helpers
 ;;; ------------------------------------------------------------
@@ -701,6 +761,117 @@
   )
 )
 
+(defun g6:pointOnSegment (pt a b tol / ap ab cross dotv len2)
+  (setq pt (g6:pt3 pt)
+        a (g6:pt3 a)
+        b (g6:pt3 b)
+        ap (g6:pt- pt a)
+        ab (g6:pt- b a)
+        cross (- (* (car ap) (cadr ab)) (* (cadr ap) (car ab)))
+        dotv (+ (* (car ap) (car ab)) (* (cadr ap) (cadr ab)))
+        len2 (+ (* (car ab) (car ab)) (* (cadr ab) (cadr ab))))
+  (and (<= (abs cross) tol)
+       (>= dotv (- tol))
+       (<= dotv (+ len2 tol)))
+)
+
+(defun g6:connectedToPoint (lineRec pt tol / p1 p2)
+  (setq p1 (cadr lineRec)
+        p2 (caddr lineRec))
+  (or (g6:ptNear pt p1 tol)
+      (g6:ptNear pt p2 tol)
+      (g6:pointOnSegment pt p1 p2 tol))
+)
+
+(defun g6:buildLineRecords (entList / out e ed p1 p2)
+  (setq out '())
+  (foreach e entList
+    (if (and e (entget e))
+      (progn
+        (setq ed (entget e)
+              p1 (cdr (assoc 10 ed))
+              p2 (cdr (assoc 11 ed)))
+        (if (and p1 p2)
+          (setq out (append out (list (list e p1 p2))))
+        )
+      )
+    )
+  )
+  out
+)
+
+(defun g6:updateLineRecord (recs ent newP1 newP2 / out rec)
+  (setq out '())
+  (foreach rec recs
+    (if (eq (car rec) ent)
+      (setq out (append out (list (list ent newP1 newP2))))
+      (setq out (append out (list rec)))
+    )
+  )
+  out
+)
+
+(defun g6:queueHasNearPoint (pts pt tol / found)
+  (setq found nil)
+  (while (and pts (null found))
+    (if (g6:ptNear (car pts) pt tol) (setq found T))
+    (setq pts (cdr pts))
+  )
+  found
+)
+
+(defun g6:collectDownstreamLines (lineRecs srcEnt startPt tol / queue seenPts moved rec ent p1 p2 pt)
+  (setq queue (list (g6:pt3 startPt))
+        seenPts '()
+        moved '())
+  (while queue
+    (setq pt (car queue)
+          queue (cdr queue))
+    (if (not (g6:queueHasNearPoint seenPts pt tol))
+      (progn
+        (setq seenPts (cons pt seenPts))
+        (foreach rec lineRecs
+          (setq ent (car rec)
+                p1 (cadr rec)
+                p2 (caddr rec))
+          (if (and (not (eq ent srcEnt))
+                   (not (member ent moved))
+                   (g6:connectedToPoint rec pt tol))
+            (progn
+              (setq moved (append moved (list ent)))
+              (if (not (g6:queueHasNearPoint seenPts p1 tol)) (setq queue (append queue (list p1))))
+              (if (not (g6:queueHasNearPoint seenPts p2 tol)) (setq queue (append queue (list p2))))
+            )
+          )
+        )
+      )
+    )
+  )
+  moved
+)
+
+(defun g6:moveDimEntity (dimEnt delta / ss base to)
+  (if (and dimEnt (entget dimEnt))
+    (progn
+      (setq ss (ssadd dimEnt)
+            base '(0.0 0.0 0.0)
+            to (g6:pt3 delta))
+      (if ss (command "_.MOVE" ss "" base to))
+    )
+  )
+)
+
+(defun g6:translateLinkedEntities (lineEnt delta breakMap dimMap / brkPair be dimE)
+  (setq brkPair (assoc lineEnt breakMap))
+  (if brkPair
+    (foreach be (cdr brkPair)
+      (g6:translateLine be delta)
+    )
+  )
+  (setq dimE (cdr (assoc lineEnt dimMap)))
+  (if dimE (g6:moveDimEntity dimE delta))
+)
+
 (defun g6:moveExternalComponents (movedPairs tol excludeChain / comps processed pair oldPt newPt delta comp seed idx entry ents deltas base ok d2)
   ;; Build components connected to each moved joint and either translate them (rigid)
   ;; or (if conflicting deltas) update endpoints at the moved joints.
@@ -876,8 +1047,9 @@
                dimOff dimOk dimEnts dimMap dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV
                layAns lay suf againAns selSS j eSel idxSel brkPair dimE txtOvr
                brkAns brkSS eligibleSS entCandidate brkParams gapW barH bars
-               oldTail oldTailEd oldTailEnd oldLineEd g1 g2 tailEnt lay
-               lineLen gapUse resolvedSel
+               resolvedSel
+               shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs
+               shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2
                )
 
   (defun *error* (msg)
@@ -1060,6 +1232,116 @@
         )
       )
 
+      ;; shorten selected long lines from this run, propagate downstream, then auto-break shortened lines
+      (if entStack
+        (progn
+          (setq shortTargets '()
+                tol 1e-8)
+          (initget "Yes No")
+          (setq shortAns (getkword "\nShorten long lines? [Yes/No] <No>: "))
+          (if (= shortAns "Yes")
+            (progn
+              (setq shortThreshold (getreal "\nThreshold <150>: "))
+              (if (or (null shortThreshold) (<= shortThreshold 0.0)) (setq shortThreshold 150.0))
+              (setq shortCap (getreal "\nCap length <150>: "))
+              (if (or (null shortCap) (<= shortCap 0.0)) (setq shortCap 150.0))
+
+              (setq shortSS (ssget "_:L" '((0 . "LINE"))))
+              (setq shortEligible (ssadd))
+              (if shortSS
+                (progn
+                  (setq j 0)
+                  (while (< j (sslength shortSS))
+                    (setq entCandidate (ssname shortSS j))
+                    (setq shortIdx (g6:index-of entCandidate entList))
+                    (if (and (not (null shortIdx)) (> (nth shortIdx userList) shortThreshold))
+                      (setq shortEligible (ssadd entCandidate shortEligible))
+                    )
+                    (setq j (1+ j))
+                  )
+                )
+              )
+
+              (setq shortOrder '()
+                    j 0)
+              (while (< j (length entList))
+                (setq e (nth j entList))
+                (if (ssmemb e shortEligible)
+                  (setq shortOrder (append shortOrder (list e)))
+                )
+                (setq j (1+ j))
+              )
+
+              (if (null shortOrder)
+                (prompt "\nNo eligible long lines selected from this G6 run.")
+                (progn
+                  (setq shortRecs (g6:buildLineRecords entList))
+                  (foreach shortEnt shortOrder
+                    (if (and shortEnt (entget shortEnt))
+                      (progn
+                        (setq ed (entget shortEnt)
+                              anchor (cdr (assoc 10 ed))
+                              oldEnd (cdr (assoc 11 ed)))
+                        (if (and anchor oldEnd)
+                          (progn
+                            (setq targetLen (* shortCap scaleFactor)
+                                  newEnd (polar anchor (angle anchor oldEnd) targetLen)
+                                  delta (g6:pt- newEnd oldEnd))
+                            (if (> (distance (g6:pt3 newEnd) (g6:pt3 oldEnd)) tol)
+                              (progn
+                                (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
+                                (entmod ed)
+                                (entupd shortEnt)
+
+                                (setq shortRecs (g6:updateLineRecord shortRecs shortEnt anchor newEnd))
+                                (setq shortMoved (g6:collectDownstreamLines shortRecs shortEnt oldEnd tol))
+                                (foreach moveEnt shortMoved
+                                  (if (and moveEnt (entget moveEnt))
+                                    (progn
+                                      (setq moveEd (entget moveEnt)
+                                            moveP1 (cdr (assoc 10 moveEd))
+                                            moveP2 (cdr (assoc 11 moveEd)))
+                                      (if (and moveP1 moveP2)
+                                        (progn
+                                          (setq moveP1 (g6:pt+ moveP1 delta)
+                                                moveP2 (g6:pt+ moveP2 delta)
+                                                moveEd (subst (cons 10 moveP1) (assoc 10 moveEd) moveEd)
+                                                moveEd (subst (cons 11 moveP2) (assoc 11 moveEd) moveEd))
+                                          (entmod moveEd)
+                                          (entupd moveEnt)
+                                          (setq shortRecs (g6:updateLineRecord shortRecs moveEnt moveP1 moveP2))
+                                          (g6:translateLinkedEntities moveEnt delta breakMap dimMap)
+                                        )
+                                      )
+                                    )
+                                  )
+                                )
+                                (setq shortTargets (append shortTargets (list shortEnt)))
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+
+                  (if shortTargets
+                    (progn
+                      (setq brkParams (g6:breakParamsDefault)
+                            gapW (nth 0 brkParams)
+                            barH (nth 1 brkParams))
+                      (foreach shortEnt shortTargets
+                        (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH))
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+
       ;; add break markers to selected lines from this run
       (if entStack
         (progn
@@ -1092,62 +1374,7 @@
                             j 0)
                       (while (< j (sslength eligibleSS))
                         (setq eSel (ssname eligibleSS j))
-                        (setq brkPair (assoc eSel breakMap))
-                        (if brkPair
-                          (progn
-                            (setq oldTail (nth 2 (cdr brkPair)))
-                            (if (and oldTail (entget oldTail))
-                              (progn
-                                (setq oldTailEd (entget oldTail)
-                                      oldTailEnd (cdr (assoc 11 oldTailEd))
-                                      oldLineEd (entget eSel))
-                                (if (and oldTailEnd oldLineEd (assoc 11 oldLineEd))
-                                  (progn
-                                    (setq oldLineEd (subst (cons 11 oldTailEnd) (assoc 11 oldLineEd) oldLineEd))
-                                    (entmod oldLineEd)
-                                    (entupd eSel)
-                                  )
-                                )
-                              )
-                            )
-                            (foreach be (cdr brkPair) (if (and be (entget be)) (entdel be)))
-                          )
-                        )
-
-                        (setq ed (entget eSel)
-                              p1 (cdr (assoc 10 ed))
-                              p2 (cdr (assoc 11 ed))
-                              lay (cdr (assoc 8 ed)))
-                        (if (null lay) (setq lay "0"))
-
-                        (if (and p1 p2)
-                          (progn
-                            (setq lineLen (distance p1 p2)
-                                  gapUse gapW)
-                            (if (>= gapUse lineLen)
-                              (setq gapUse (max 0.001 (* 0.5 lineLen)))
-                            )
-                            (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
-                                  ang (angle p1 p2)
-                                  g1 (polar mid (+ ang pi) (/ gapUse 2.0))
-                                  g2 (polar mid ang (/ gapUse 2.0)))
-
-                            (setq bars (g6:createBreakerBars eSel gapUse barH))
-
-                            (setq ed (subst (cons 11 g1) (assoc 11 ed) ed))
-                            (entmod ed)
-                            (entupd eSel)
-
-                            (setq tailEnt (entmakex (list (cons 0 "LINE") (cons 8 lay) (cons 10 g2) (cons 11 p2))))
-
-                            (if (null bars) (setq bars (list nil nil)))
-                            (setq bars (append bars (list tailEnt)))
-                            (if brkPair
-                              (setq breakMap (subst (cons eSel bars) brkPair breakMap))
-                              (setq breakMap (cons (cons eSel bars) breakMap))
-                            )
-                          )
-                        )
+                        (setq breakMap (g6:applyBreakerToLine eSel breakMap gapW barH))
                         (setq j (1+ j))
                       )
                     )

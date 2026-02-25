@@ -519,6 +519,27 @@
   (foreach e lst (if (and e (entget e)) (entdel e)))
 )
 
+(defun g6:buildSegStack (entList userList / out i e ed p1 p2 userLen)
+  (setq out '()
+        i 0)
+  (while (< i (length entList))
+    (setq e (nth i entList)
+          userLen (nth i userList))
+    (if (and e (entget e))
+      (progn
+        (setq ed (entget e)
+              p1 (cdr (assoc 10 ed))
+              p2 (cdr (assoc 11 ed)))
+        (if (and p1 p2)
+          (setq out (cons (list e p1 p2 userLen (g6:fmtLen userLen)) out))
+        )
+      )
+    )
+    (setq i (1+ i))
+  )
+  (reverse out)
+)
+
 ;;; ------------------------------------------------------------
 ;;; Continue-from helper (temporarily restore osnap for pick)
 ;;; ------------------------------------------------------------
@@ -1076,6 +1097,7 @@
                resolvedSel
                shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
                shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen pt dist
+               segStack shortLoop shortOk shortRollback shortMarkPlaced reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
                )
 
   (defun *error* (msg)
@@ -1193,12 +1215,10 @@
                   (progn
                     (setq chainId (1+ chainId))
                     (setq pt nextpt)
-                    (prompt "\nContinue point set.")
-                  )
-                  (prompt "\nContinue cancelled; keeping current point.")
-                )
+                    (prompt "\nContinue point set."))
+                  (prompt "\nContinue cancelled; keeping current point."))
                 (command "_.REGEN")
-                (setq finishedInput T)
+                (updatePreview)
                )
 
                ((or (= key 85) (= key 117)) ;; U/u undo
@@ -1255,135 +1275,157 @@
           (setq entList   (reverse entStack))
           (setq userList  (reverse userLenStack))
           (setq chainList (reverse chainStack))
+          (setq segStack (g6:buildSegStack entList userList))
         )
       )
-
       ;; shorten selected long lines from this run, propagate downstream, then auto-break shortened lines
       (if entStack
         (progn
-          (setq shortTargets '()
-                tol 1e-8)
-          (initget "Yes No")
-          (setq shortAns (getkword "\nShorten long lines? [Yes/No] <No>: "))
-          (if (= shortAns "Yes")
-            (progn
-              (setq shortThreshold (getreal "\nThreshold <150>: "))
-              (if (or (null shortThreshold) (<= shortThreshold 0.0)) (setq shortThreshold 150.0))
-              (setq shortCap (getreal "\nCap length <150>: "))
-              (if (or (null shortCap) (<= shortCap 0.0)) (setq shortCap 150.0))
+          (setq shortLoop T
+                shortMarkPlaced nil)
+          (while shortLoop
+            (setq shortLoop nil
+                  shortTargets '()
+                  tol 1e-8)
+            (initget "Yes No")
+            (setq shortAns (getkword "\nShorten long lines? [Yes/No] <No>: "))
+            (if (= shortAns "Yes")
+              (progn
+                (command "_.UNDO" "_Mark")
+                (setq shortMarkPlaced T)
 
-              (setq shortSS (ssget "_:L" '((0 . "LINE"))))
-              (setq shortEligible (ssadd))
-              (if shortSS
-                (progn
-                  (setq j 0)
-                  (while (< j (sslength shortSS))
-                    (setq entCandidate (ssname shortSS j))
-                    (setq shortIdx (g6:index-of entCandidate entList))
-                    (if (and (not (null shortIdx)) (> (nth shortIdx userList) shortThreshold))
-                      (setq shortEligible (ssadd entCandidate shortEligible))
+                (setq shortThreshold (getreal "\nThreshold <150>: "))
+                (if (or (null shortThreshold) (<= shortThreshold 0.0)) (setq shortThreshold 150.0))
+                (setq shortCap (getreal "\nCap length <150>: "))
+                (if (or (null shortCap) (<= shortCap 0.0)) (setq shortCap 150.0))
+
+                (setq shortSS (ssget "_:L" '((0 . "LINE"))))
+                (setq shortEligible (ssadd))
+                (if shortSS
+                  (progn
+                    (setq j 0)
+                    (while (< j (sslength shortSS))
+                      (setq entCandidate (ssname shortSS j))
+                      (setq shortIdx (g6:index-of entCandidate entList))
+                      (if (and (not (null shortIdx)) (> (nth shortIdx userList) shortThreshold))
+                        (setq shortEligible (ssadd entCandidate shortEligible))
+                      )
+                      (setq j (1+ j))
                     )
-                    (setq j (1+ j))
                   )
                 )
-              )
 
-              (setq shortOrder '()
-                    j 0)
-              (while (< j (length entList))
-                (setq e (nth j entList))
-                (if (ssmemb e shortEligible)
-                  (setq shortOrder (append shortOrder (list e)))
+                (setq shortOrder '()
+                      j 0)
+                (while (< j (length entList))
+                  (setq e (nth j entList))
+                  (if (ssmemb e shortEligible)
+                    (setq shortOrder (append shortOrder (list e)))
+                  )
+                  (setq j (1+ j))
                 )
-                (setq j (1+ j))
-              )
 
-              (if (null shortOrder)
-                (prompt "\nNo eligible long lines selected from this G6 run.")
-                (progn
-                  (setq shortRecs (car (g6:buildLineRecords entList))
-                        shortEndpoints (g6:endpointsFromLineRecs shortRecs))
-                  (foreach shortEnt shortOrder
-                    (if (and shortEnt (entget shortEnt))
-                      (progn
-                        (setq ed (entget shortEnt)
-                              anchor (cdr (assoc 10 ed))
-                              oldEnd (cdr (assoc 11 ed)))
-                        (if (and anchor oldEnd)
-                          (progn
-                            (setq shortEndpoints (g6:endpointsFromLineRecs shortRecs)
-                                  userCapLen (* shortCap scaleFactor)
-                                  requiredCapLen 0.0)
-                            (foreach pt shortEndpoints
-                              (if (and (not (g6:ptNear pt anchor tol))
-                                       (not (g6:ptNear pt oldEnd tol))
-                                       (g6:pointOnSegment pt anchor oldEnd tol))
-                                (progn
-                                  (setq dist (distance (g6:pt3 anchor) (g6:pt3 pt)))
-                                  (if (> dist requiredCapLen) (setq requiredCapLen dist))
+                (if (null shortOrder)
+                  (prompt "\nNo eligible long lines selected from this G6 run.")
+                  (progn
+                    (setq shortRecs (car (g6:buildLineRecords entList))
+                          shortEndpoints (g6:endpointsFromLineRecs shortRecs))
+                    (foreach shortEnt shortOrder
+                      (if (and shortEnt (entget shortEnt))
+                        (progn
+                          (setq ed (entget shortEnt)
+                                anchor (cdr (assoc 10 ed))
+                                oldEnd (cdr (assoc 11 ed)))
+                          (if (and anchor oldEnd)
+                            (progn
+                              (setq shortEndpoints (g6:endpointsFromLineRecs shortRecs)
+                                    userCapLen (* shortCap scaleFactor)
+                                    requiredCapLen 0.0)
+                              (foreach pt shortEndpoints
+                                (if (and (not (g6:ptNear pt anchor tol))
+                                         (not (g6:ptNear pt oldEnd tol))
+                                         (g6:pointOnSegment pt anchor oldEnd tol))
+                                  (progn
+                                    (setq dist (distance (g6:pt3 anchor) (g6:pt3 pt)))
+                                    (if (> dist requiredCapLen) (setq requiredCapLen dist))
+                                  )
                                 )
                               )
-                            )
-                            (setq capUsedLen (max userCapLen requiredCapLen))
-                            (if (> capUsedLen userCapLen)
-                              (prompt "\nCap increased to preserve mid connections.")
-                            )
-                            (setq targetLen capUsedLen
-                                  newEnd (polar anchor (angle anchor oldEnd) targetLen)
-                                  delta (g6:pt- newEnd oldEnd))
-                            (if (> (distance (g6:pt3 newEnd) (g6:pt3 oldEnd)) tol)
-                              (progn
-                                (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
-                                (entmod ed)
-                                (entupd shortEnt)
+                              (setq capUsedLen (max userCapLen requiredCapLen))
+                              (if (> capUsedLen userCapLen)
+                                (prompt "\nCap increased to preserve mid connections."))
+                              (setq targetLen capUsedLen
+                                    newEnd (polar anchor (angle anchor oldEnd) targetLen)
+                                    delta (g6:pt- newEnd oldEnd))
+                              (if (> (distance (g6:pt3 newEnd) (g6:pt3 oldEnd)) tol)
+                                (progn
+                                  (setq ed (subst (cons 11 newEnd) (assoc 11 ed) ed))
+                                  (entmod ed)
+                                  (entupd shortEnt)
 
-                                (setq shortRecs (g6:updateLineRecord shortRecs shortEnt anchor newEnd))
-                                (setq shortEndpoints (g6:endpointsFromLineRecs shortRecs))
-                                (setq shortMoved (g6:collectDownstreamLines shortRecs shortEndpoints shortEnt oldEnd anchor tol))
-                                (foreach moveEnt shortMoved
-                                  (if (and moveEnt (entget moveEnt))
-                                    (progn
-                                      (setq moveEd (entget moveEnt)
-                                            moveP1 (cdr (assoc 10 moveEd))
-                                            moveP2 (cdr (assoc 11 moveEd)))
-                                      (if (and moveP1 moveP2)
-                                        (progn
-                                          (setq moveP1 (g6:pt+ moveP1 delta)
-                                                moveP2 (g6:pt+ moveP2 delta)
-                                                moveEd (subst (cons 10 moveP1) (assoc 10 moveEd) moveEd)
-                                                moveEd (subst (cons 11 moveP2) (assoc 11 moveEd) moveEd))
-                                          (entmod moveEd)
-                                          (entupd moveEnt)
-                                          (setq shortRecs (g6:updateLineRecord shortRecs moveEnt moveP1 moveP2))
-                                          (g6:translateLinkedEntities moveEnt delta breakMap dimMap)
+                                  (setq shortRecs (g6:updateLineRecord shortRecs shortEnt anchor newEnd))
+                                  (setq shortEndpoints (g6:endpointsFromLineRecs shortRecs))
+                                  (setq shortMoved (g6:collectDownstreamLines shortRecs shortEndpoints shortEnt oldEnd anchor tol))
+                                  (foreach moveEnt shortMoved
+                                    (if (and moveEnt (entget moveEnt))
+                                      (progn
+                                        (setq moveEd (entget moveEnt)
+                                              moveP1 (cdr (assoc 10 moveEd))
+                                              moveP2 (cdr (assoc 11 moveEd)))
+                                        (if (and moveP1 moveP2)
+                                          (progn
+                                            (setq moveP1 (g6:pt+ moveP1 delta)
+                                                  moveP2 (g6:pt+ moveP2 delta)
+                                                  moveEd (subst (cons 10 moveP1) (assoc 10 moveEd) moveEd)
+                                                  moveEd (subst (cons 11 moveP2) (assoc 11 moveEd) moveEd))
+                                            (entmod moveEd)
+                                            (entupd moveEnt)
+                                            (setq shortRecs (g6:updateLineRecord shortRecs moveEnt moveP1 moveP2))
+                                            (g6:translateLinkedEntities moveEnt delta breakMap dimMap)
+                                          )
                                         )
                                       )
                                     )
                                   )
+                                  (setq shortTargets (append shortTargets (list shortEnt)))
                                 )
-                                (setq shortTargets (append shortTargets (list shortEnt)))
                               )
                             )
                           )
                         )
                       )
                     )
-                  )
 
-                  (if shortTargets
-                    (progn
-                      (setq brkParams (g6:pickBreakParams (car shortTargets) (g6:breakParamsDefault)))
-                      (if brkParams
-                        (progn
-                          (setq gapW (nth 0 brkParams)
-                                barH (nth 1 brkParams))
-                          (foreach shortEnt shortTargets
-                            (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH))
+                    (if shortTargets
+                      (progn
+                        (setq brkParams (g6:pickBreakParams (car shortTargets) (g6:breakParamsDefault)))
+                        (if brkParams
+                          (progn
+                            (setq gapW (nth 0 brkParams)
+                                  barH (nth 1 brkParams))
+                            (foreach shortEnt shortTargets
+                              (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH))
+                            )
                           )
                         )
                       )
                     )
                   )
+                )
+
+                (initget "Yes No")
+                (setq shortOk (getkword "\nShorten + breakers OK? [Yes/No] <Yes>: "))
+                (if (= shortOk "No")
+                  (progn
+                    (command "_.UNDO" "_Back")
+                    (setq breakMap '()
+                          dimMap '()
+                          shortTargets '()
+                          segStack (g6:buildSegStack entList userList)
+                          shortLoop T
+                          shortMarkPlaced nil)
+                  )
+                  (setq shortMarkPlaced nil)
                 )
               )
             )
@@ -1584,6 +1626,72 @@
                     (if (null againAns) (setq againAns "No"))
                   )
                 )
+              )
+            )
+          )
+        )
+      )
+
+      (initget "Yes No")
+      (setq reDimAns (getkword "\nReposition dimensions? [Yes/No] <No>: "))
+      (if (= reDimAns "Yes")
+        (if (null dimMap)
+          (prompt "\nNo dimensions from this run to reposition.")
+          (progn
+            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
+            (if dimOff
+              (progn
+                (setq reDimLayMap '())
+                (foreach reDimPair dimMap
+                  (setq oldDimEnt (cdr reDimPair)
+                        oldDimLay nil)
+                  (if (and oldDimEnt (entget oldDimEnt))
+                    (setq oldDimLay (cdr (assoc 8 (entget oldDimEnt)))))
+                  (if (null oldDimLay) (setq oldDimLay "0"))
+                  (setq reDimLayMap (cons (cons (car reDimPair) oldDimLay) reDimLayMap)))
+
+                (g6:deleteEntList (mapcar 'cdr dimMap))
+                (setq dimMap '()
+                      i 0)
+                (while (< i (length entList))
+                  (setq e (nth i entList)
+                        userV (nth i userList))
+                  (if (> userV 25.0)
+                    (progn
+                      (setq ed (entget e)
+                            p1 (cdr (assoc 10 ed))
+                            p2 (cdr (assoc 11 ed))
+                            brkPair (assoc e breakMap))
+                      (if brkPair
+                        (progn
+                          (setq tailEnt (nth 2 (cdr brkPair)))
+                          (if (and tailEnt (entget tailEnt))
+                            (setq p2 (cdr (assoc 11 (entget tailEnt)))))))
+                      (if (and p1 p2)
+                        (progn
+                          (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
+                                ang (angle p1 p2)
+                                nAng (+ ang (/ pi 2.0))
+                                dimPt (polar mid nAng dimOff))
+                          (command "_.DIMALIGNED" p1 p2 dimPt "")
+                          (setq dimEnt (g6:lastDim))
+                          (if dimEnt
+                            (progn
+                              (setq oldDimLay (cdr (assoc e reDimLayMap)))
+                              (if oldDimLay (g6:setLayerEnt dimEnt oldDimLay))
+                              (setq txtOvr (g6:fmtLen userV))
+                              (if (< userV 120.0)
+                                (setq txtOvr (g6:fmtLen userV))
+                                (progn
+                                  (setq suf "")
+                                  (setq lay (cdr (assoc 8 (entget dimEnt))))
+                                  (if (null lay) (setq lay "0"))
+                                  (setq suf (g6:getSuffix lay))
+                                  (setq txtOvr (strcat (g6:fmtLen userV) suf))))
+                              (g6:setDimText dimEnt txtOvr)
+                              (setq dimMap (cons (cons e dimEnt) dimMap)))
+                            (setq dimMap (cons (cons e nil) dimMap)))))))
+                  (setq i (1+ i)))
               )
             )
           )

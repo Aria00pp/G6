@@ -1316,6 +1316,7 @@
                                   requiredCapLen 0.0)
                             (foreach pt shortEndpoints
                               (if (and (not (g6:ptNear pt anchor tol))
+                                       (not (g6:ptNear pt oldEnd tol))
                                        (g6:pointOnSegment pt anchor oldEnd tol))
                                 (progn
                                   (setq dist (distance (g6:pt3 anchor) (g6:pt3 pt)))

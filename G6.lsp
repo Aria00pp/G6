@@ -1075,7 +1075,7 @@
                brkAns brkSS eligibleSS entCandidate brkParams gapW barH bars
                resolvedSel
                shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
-               shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2
+               shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen pt dist
                )
 
   (defun *error* (msg)
@@ -1311,7 +1311,23 @@
                               oldEnd (cdr (assoc 11 ed)))
                         (if (and anchor oldEnd)
                           (progn
-                            (setq targetLen (* shortCap scaleFactor)
+                            (setq shortEndpoints (g6:endpointsFromLineRecs shortRecs)
+                                  userCapLen (* shortCap scaleFactor)
+                                  requiredCapLen 0.0)
+                            (foreach pt shortEndpoints
+                              (if (and (not (g6:ptNear pt anchor tol))
+                                       (g6:pointOnSegment pt anchor oldEnd tol))
+                                (progn
+                                  (setq dist (distance (g6:pt3 anchor) (g6:pt3 pt)))
+                                  (if (> dist requiredCapLen) (setq requiredCapLen dist))
+                                )
+                              )
+                            )
+                            (setq capUsedLen (max userCapLen requiredCapLen))
+                            (if (> capUsedLen userCapLen)
+                              (prompt "\nCap increased to preserve mid connections.")
+                            )
+                            (setq targetLen capUsedLen
                                   newEnd (polar anchor (angle anchor oldEnd) targetLen)
                                   delta (g6:pt- newEnd oldEnd))
                             (if (> (distance (g6:pt3 newEnd) (g6:pt3 oldEnd)) tol)

@@ -210,6 +210,15 @@
         )
       )
       ((= typ 3)
+        (if (> (strlen typed) 0)
+          (setq off (abs (atof typed)))
+          (if (and refMid refPerp dat (listp dat))
+            (progn
+              (setq vec (g6:pt- dat refMid)
+                    off (abs (+ (* (car vec) (car refPerp)) (* (cadr vec) (cadr refPerp)))))
+            )
+          )
+        )
         (setq done T)
       )
       ((= typ 2)
@@ -1159,10 +1168,11 @@
           (while (< i (length entList))
             (setq userV (nth i userList))
             (if (> userV 25.0)
-              (setq dimEligible (append dimEligible (list (nth i entList))))
+              (setq dimEligible (cons (nth i entList) dimEligible))
             )
             (setq i (1+ i))
           )
+          (setq dimEligible (reverse dimEligible))
           (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
           (if dimOff
             (progn

@@ -1173,7 +1173,13 @@
             (setq i (1+ i))
           )
           (setq dimEligible (reverse dimEligible))
-          (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
+          (if dimEligible
+            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
+            (progn
+              (prompt "\nNo segments eligible for dimensions (>25).")
+              (setq dimOff nil)
+            )
+          )
           (if dimOff
             (progn
               (setq dimOk nil)

@@ -5,7 +5,7 @@
 ;;;  - Draw chained LINE segments at fixed angles with typed lengths
 ;;;  - Optional break markers as two LINE bars (||), size adjustable with live preview
 ;;;    and applies to selected lines (persisted).
-;;;  - Continue-from point: press C while in length input to pick a new start point without ending.
+;;;  - Continue/branch-from point: press C while in length input to pick a connected start point without ending.
 ;;;  - Dimensions with satisfaction loop (re-pick offset distance).
 ;;;  - Layer assignment popup + per-layer suffix saved; moves lines + dims + breaks.
 ;;;  - Connected LINE networks stay attached when joints move.
@@ -545,9 +545,36 @@
 ;;; ------------------------------------------------------------
 (defun g6:pickContinuePoint (osOn osBack / p)
   (setvar "OSMODE" osOn)
-  (setq p (getpoint "\nContinue from point: "))
+  (setq p (getpoint "\nContinue/branch from point: "))
   (setvar "OSMODE" osBack)
   p
+)
+
+(defun g6:snapToRunEndpoint (picked entStack tol / best bestDist e ed p1 p2 endpoint d)
+  ;; Normalize a branch pick to the nearest exact endpoint created in this G6 run.
+  (setq best nil
+        bestDist nil)
+  (foreach e entStack
+    (if (and e (entget e))
+      (progn
+        (setq ed (entget e)
+              p1 (cdr (assoc 10 ed))
+              p2 (cdr (assoc 11 ed)))
+        (foreach endpoint (list p1 p2)
+          (if endpoint
+            (progn
+              (setq d (distance (g6:pt3 picked) (g6:pt3 endpoint)))
+              (if (and (< d tol) (or (null bestDist) (< d bestDist)))
+                (setq best endpoint
+                      bestDist d)
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+  (if best best picked)
 )
 
 ;;; ------------------------------------------------------------
@@ -1087,7 +1114,7 @@
 ;;; ============================================================
 (defun c:G6 ( / *error* oldOsmode oldCmdecho
                pt prevPt2 lenStr finishedInput done lastLen gr key
-               angList idx scaleFactor
+               angList idx scaleFactor connectionTol
                ptsStack entStack lenStack userLenStack chainStack chainId
                entList userList chainList breakMap
                i e userLen len nextpt
@@ -1117,6 +1144,7 @@
   (setq angList (mapcar 'g6:deg->rad '(30 90 150 -150 -90 -30)))
   (setq idx 0)
   (setq scaleFactor 0.01)
+  (setq connectionTol 0.001)
 
   (setq ptsStack '()
         entStack '()
@@ -1160,7 +1188,7 @@
           (strcat
             "\nCurrent angle = "
             (rtos (g6:rad->deg (nth idx angList)) 2 0)
-            "  | Enter length (scale 0.01; TAB=angle, U=undo, C=continue, ENTER=finish): "
+            "  | Enter length (scale 0.01; TAB=angle, U=undo, C=continue/branch from point, ENTER=finish): "
           )
         )
         (updatePreview)
@@ -1213,9 +1241,10 @@
                 (setq nextpt (g6:pickContinuePoint oldOsmode 0))
                 (if nextpt
                   (progn
+                    (setq nextpt (g6:snapToRunEndpoint nextpt entStack connectionTol))
                     (setq chainId (1+ chainId))
                     (setq pt nextpt)
-                    (prompt "\nContinue point set."))
+                    (prompt "\nContinue/branch point set."))
                   (prompt "\nContinue cancelled; keeping current point."))
                 (command "_.REGEN")
                 (updatePreview)
@@ -1286,7 +1315,7 @@
           (while shortLoop
             (setq shortLoop nil
                   shortTargets '()
-                  tol 1e-8)
+                  tol connectionTol)
             (initget "Yes No")
             (setq shortAns (getkword "\nShorten long lines? [Yes/No] <No>: "))
             (if (= shortAns "Yes")

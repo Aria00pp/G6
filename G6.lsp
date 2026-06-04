@@ -3,7 +3,7 @@
 ;;; G6 (patched)
 ;;; Features:
 ;;;  - Draw chained LINE segments at fixed angles with typed lengths
-;;;  - Optional break markers as two LINE bars (||) or aligned TEXT, size adjustable
+;;;  - Optional break markers as two LINE bars (||) or a selected block reference, size adjustable
 ;;;    with live preview and applies to selected lines (persisted).
 ;;;  - Continue/branch-from point: press C while in length input to pick a connected start point without ending.
 ;;;  - Dimensions with satisfaction loop (re-pick offset distance).
@@ -47,14 +47,16 @@
   )
   (if lst i nil)
 )
-(defun g6:resolveSourceLine (eSel entList breakMap / src pair)
+(defun g6:resolveLayerSourceLine (eSel entList breakMap / src pair tailEnt)
   (if (not (null (g6:index-of eSel entList)))
     eSel
     (progn
       (setq src nil)
       (while (and breakMap (null src))
-        (setq pair (car breakMap))
-        (if (member eSel (cdr pair)) (setq src (car pair)))
+        (setq pair (car breakMap)
+              tailEnt (nth 2 (cdr pair)))
+        ;; Tail lines are visible continuations of their source; marker helpers are ignored.
+        (if (eq eSel tailEnt) (setq src (car pair)))
         (setq breakMap (cdr breakMap))
       )
       src
@@ -114,33 +116,58 @@
 
 ;;; ------------------------------------------------------------
 ;;; Break parameters and live preview
-;;; params = (gapW barH mode text)
+;;; params = (gapW barH mode blockName scaleX scaleY scaleZ rotation)
 ;;; ------------------------------------------------------------
 (defun g6:getBreakMode ( / mode)
   (setq mode (getenv "G6_BRK_MODE"))
   (if mode (setq mode (strcase mode)))
-  (if (member mode '("BARS" "TEXT")) mode "BARS")
+  (if (member mode '("BARS" "SELECT")) mode "BARS")
 )
 
 (defun g6:setBreakMode (mode)
-  (if (member mode '("BARS" "TEXT")) (setenv "G6_BRK_MODE" mode))
+  (if (member mode '("BARS" "SELECT")) (setenv "G6_BRK_MODE" mode))
 )
 
-(defun g6:getBreakText ( / txt)
-  (setq txt (getenv "G6_BRK_TEXT"))
-  (if (or (null txt) (= txt "")) "ss" txt)
+(defun g6:getEnvNumber (key def / val)
+  (setq val (getenv key))
+  (if (and val (/= val "")) (atof val) def)
 )
 
-(defun g6:setBreakText (txt)
-  (if (and txt (/= txt "")) (setenv "G6_BRK_TEXT" txt))
+(defun g6:setEnvNumber (key val)
+  (setenv key (rtos val 2 8))
 )
 
-(defun g6:breakParamsDefault ( / gapW barH mode txt)
+(defun g6:getBreakBlock ( / name)
+  (setq name (getenv "G6_BRK_BLOCK"))
+  (if (and name (/= name "") (tblsearch "BLOCK" name)) name nil)
+)
+
+(defun g6:setBreakBlockParams (name sx sy sz rot)
+  (if (and name (tblsearch "BLOCK" name))
+    (progn
+      (setenv "G6_BRK_BLOCK" name)
+      (g6:setEnvNumber "G6_BRK_BLOCK_SX" sx)
+      (g6:setEnvNumber "G6_BRK_BLOCK_SY" sy)
+      (g6:setEnvNumber "G6_BRK_BLOCK_SZ" sz)
+      (g6:setEnvNumber "G6_BRK_BLOCK_ROT" rot)
+    )
+  )
+)
+
+(defun g6:breakParamsDefault ( / gapW barH mode blockName sx sy sz rot)
   (setq gapW (g6:getEnvReal "G6_BRK_GAPW" 0.12)
         barH (g6:getEnvReal "G6_BRK_BARH" 0.10)
         mode (g6:getBreakMode)
-        txt (g6:getBreakText))
-  (list gapW barH mode txt)
+        blockName (g6:getBreakBlock)
+        sx (g6:getEnvNumber "G6_BRK_BLOCK_SX" 1.0)
+        sy (g6:getEnvNumber "G6_BRK_BLOCK_SY" 1.0)
+        sz (g6:getEnvNumber "G6_BRK_BLOCK_SZ" 1.0)
+        rot (g6:getEnvNumber "G6_BRK_BLOCK_ROT" 0.0))
+  (if (and (= mode "SELECT") (null blockName)) (setq mode "BARS"))
+  (list gapW barH mode blockName sx sy sz rot)
+)
+(defun g6:dimensionEligibleP (userLen)
+  (and userLen (>= userLen 150.0))
 )
 
 (defun g6:drawPreviewSegs (segs col)
@@ -364,43 +391,69 @@
   val
 )
 
-(defun g6:pickBreakParams (sampleEnt params / ed p1 p2 mid ang gapW barH mode txt modeAns txtAns v ans ok)
+(defun g6:selectBreakerBlock ( / sel ent ed)
+  (setq sel (entsel "\nSelect breaker marker object (block reference): "))
+  (if sel
+    (progn
+      (setq ent (car sel)
+            ed (entget ent))
+      (if (= (cdr (assoc 0 ed)) "INSERT")
+        (list (cdr (assoc 2 ed))
+              (if (assoc 41 ed) (cdr (assoc 41 ed)) 1.0)
+              (if (assoc 42 ed) (cdr (assoc 42 ed)) 1.0)
+              (if (assoc 43 ed) (cdr (assoc 43 ed)) 1.0)
+              (if (assoc 50 ed) (cdr (assoc 50 ed)) 0.0))
+        (progn
+          (prompt "\nSelected marker must be a block reference (INSERT); using Bars mode.")
+          nil
+        )
+      )
+    )
+  )
+)
+
+(defun g6:pickBreakParams (sampleEnt params / ed p1 p2 mid ang gapW barH mode blockName sx sy sz rot modeAns blockParams v ans ok)
   (setq ed (entget sampleEnt)
         p1 (cdr (assoc 10 ed))
         p2 (cdr (assoc 11 ed))
         gapW (nth 0 params)
         barH (nth 1 params)
         mode (nth 2 params)
-        txt (nth 3 params)
+        blockName (nth 3 params)
+        sx (nth 4 params)
+        sy (nth 5 params)
+        sz (nth 6 params)
+        rot (nth 7 params)
         ok nil)
-  (if (not (member mode '("BARS" "TEXT"))) (setq mode "BARS"))
-  (if (or (null txt) (= txt "")) (setq txt "ss"))
+  (if (not (member mode '("BARS" "SELECT"))) (setq mode "BARS"))
+  (if (and (= mode "SELECT") (or (null blockName) (null (tblsearch "BLOCK" blockName)))) (setq mode "BARS"))
   (if (and p1 p2)
     (progn
-      (initget "Bars Text")
-      (setq modeAns (getkword (strcat "\nBreaker marker [Bars/Text] <" (if (= mode "TEXT") "Text" "Bars") ">: ")))
+      (initget "Bars Select")
+      (setq modeAns (getkword (strcat "\nBreaker marker [Bars/Select] <" (if (= mode "SELECT") "Select" "Bars") ">: ")))
       (if modeAns (setq mode (strcase modeAns)))
-      (if (= mode "TEXT")
+      (if (= mode "SELECT")
         (progn
-          (setq txtAns (getstring T (strcat "\nBreaker text <" txt ">: ")))
-          (if (/= txtAns "") (setq txt txtAns))
+          (setq blockParams (g6:selectBreakerBlock))
+          (if blockParams
+            (setq blockName (nth 0 blockParams)
+                  sx (nth 1 blockParams)
+                  sy (nth 2 blockParams)
+                  sz (nth 3 blockParams)
+                  rot (nth 4 blockParams))
+            (setq mode "BARS")
+          )
         )
       )
       (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
             ang (angle p1 p2))
       (while (not ok)
         (setq v (g6:pickBreakOneValue "\nPick breaker width (gapW): move/click or type value, Enter=accept, Esc=cancel. " mid ang gapW barH "GAP"))
-        (if (null v)
-          (setq ok 'CANCEL)
-          (setq gapW v)
-        )
+        (if (null v) (setq ok 'CANCEL) (setq gapW v))
         (if (not (eq ok 'CANCEL))
           (progn
             (setq v (g6:pickBreakOneValue "\nPick breaker height (barH): move/click or type value, Enter=accept, Esc=cancel. " mid ang gapW barH "BAR"))
-            (if (null v)
-              (setq ok 'CANCEL)
-              (setq barH v)
-            )
+            (if (null v) (setq ok 'CANCEL) (setq barH v))
           )
         )
         (if (eq ok 'CANCEL)
@@ -409,7 +462,7 @@
             (initget "Yes No")
             (setq ans (getkword "\nBreaker size OK? [Yes/No] <Yes>: "))
             (if (or (null ans) (= ans "Yes"))
-              (setq ok T params (list gapW barH mode txt))
+              (setq ok T params (list gapW barH mode blockName sx sy sz rot))
             )
           )
         )
@@ -421,7 +474,8 @@
       (g6:setEnvReal "G6_BRK_GAPW" (nth 0 params))
       (g6:setEnvReal "G6_BRK_BARH" (nth 1 params))
       (g6:setBreakMode (nth 2 params))
-      (g6:setBreakText (nth 3 params))
+      (if (= (nth 2 params) "SELECT")
+        (g6:setBreakBlockParams (nth 3 params) (nth 4 params) (nth 5 params) (nth 6 params) (nth 7 params)))
     )
   )
   params
@@ -454,46 +508,32 @@
   )
 )
 
-(defun g6:createBreakerText (lineEnt barH txt / ed p1 p2 mid ang lay sty textEnt)
+(defun g6:createBreakerBlock (lineEnt blockName sx sy sz rot / ed p1 p2 mid ang lay markerEnt)
   (setq ed (entget lineEnt)
         p1 (cdr (assoc 10 ed))
         p2 (cdr (assoc 11 ed))
-        lay (cdr (assoc 8 ed))
-        sty (getvar "TEXTSTYLE"))
+        lay (cdr (assoc 8 ed)))
   (if (null lay) (setq lay "0"))
-  (if (and p1 p2 txt (/= txt ""))
+  (if (and p1 p2 blockName (tblsearch "BLOCK" blockName))
     (progn
       (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
-            ang (angle p1 p2))
-      (setq textEnt
-        (entmakex
-          (list (cons 0 "TEXT") (cons 8 lay) (cons 7 sty)
-                (cons 10 mid) (cons 11 mid) (cons 40 barH) (cons 1 txt)
-                (cons 50 ang) (cons 72 1) (cons 73 2))))
-      (list textEnt nil)
+            ang (angle p1 p2)
+            markerEnt (entmakex (list (cons 0 "INSERT") (cons 8 lay) (cons 2 blockName)
+                                      (cons 10 mid) (cons 41 sx) (cons 42 sy) (cons 43 sz)
+                                      (cons 50 (+ ang rot)))))
+      (list markerEnt nil)
     )
   )
 )
 
-(defun g6:createBreakerMarker (lineEnt gapW barH mode txt)
-  (if (= mode "TEXT")
-    (g6:createBreakerText lineEnt barH txt)
+(defun g6:createBreakerMarker (lineEnt gapW barH mode blockName sx sy sz rot)
+  (if (= mode "SELECT")
+    (g6:createBreakerBlock lineEnt blockName sx sy sz rot)
     (g6:createBreakerBars lineEnt gapW barH)
   )
 )
 
-(defun g6:breakerGapWidth (gapW barH mode txt / textGap)
-  (if (= mode "TEXT")
-    (progn
-      ;; Keep the selected width as a minimum, but leave enough room for centered text.
-      (setq textGap (+ (* (strlen txt) barH 0.65) (* barH 0.5)))
-      (max gapW textGap)
-    )
-    gapW
-  )
-)
-
-(defun g6:applyBreakerToLine (eSel breakMap gapW barH mode txt / brkPair oldTail oldTailEd oldTailEnd oldLineEd ed p1 p2 lay lineLen gapUse mid ang g1 g2 markers tailEnt be)
+(defun g6:applyBreakerToLine (eSel breakMap gapW barH mode blockName sx sy sz rot / brkPair oldTail oldTailEd oldTailEnd oldLineEd ed p1 p2 lay lineLen gapUse mid ang g1 g2 markers tailEnt be)
   (setq brkPair (assoc eSel breakMap))
   (if brkPair
     (progn
@@ -525,7 +565,7 @@
   (if (and p1 p2)
     (progn
       (setq lineLen (distance p1 p2)
-            gapUse (g6:breakerGapWidth gapW barH mode txt))
+            gapUse gapW)
       (if (>= gapUse lineLen)
         (setq gapUse (max 0.001 (* 0.5 lineLen)))
       )
@@ -534,7 +574,7 @@
             g1 (polar mid (+ ang pi) (/ gapUse 2.0))
             g2 (polar mid ang (/ gapUse 2.0)))
 
-      (setq markers (g6:createBreakerMarker eSel gapUse barH mode txt))
+      (setq markers (g6:createBreakerMarker eSel gapUse barH mode blockName sx sy sz rot))
 
       (setq ed (subst (cons 11 g1) (assoc 11 ed) ed))
       (entmod ed)
@@ -1201,7 +1241,7 @@
                i e userLen len nextpt
                dimOff dimOk dimEnts dimMap dimEligible dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV tailEnt
                layAns lay suf againAns selSS selectedSources j eSel idxSel brkPair dimE txtOvr be
-               brkAns brkSS eligibleSS entCandidate brkParams gapW barH brkMode brkText
+               brkAns brkSS eligibleSS entCandidate brkParams gapW barH brkMode brkBlock brkSx brkSy brkSz brkRot
                shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
                shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen shortPt dist
                segStack shortLoop shortOk shortRollback shortMarkPlaced reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
@@ -1513,9 +1553,13 @@
                             (setq gapW (nth 0 brkParams)
                                   barH (nth 1 brkParams)
                                   brkMode (nth 2 brkParams)
-                                  brkText (nth 3 brkParams))
+                                  brkBlock (nth 3 brkParams)
+                                  brkSx (nth 4 brkParams)
+                                  brkSy (nth 5 brkParams)
+                                  brkSz (nth 6 brkParams)
+                                  brkRot (nth 7 brkParams))
                             (foreach shortEnt shortTargets
-                              (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH brkMode brkText))
+                              (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH brkMode brkBlock brkSx brkSy brkSz brkRot))
                             )
                           )
                         )
@@ -1574,11 +1618,15 @@
                       (setq gapW (nth 0 brkParams)
                             barH (nth 1 brkParams)
                             brkMode (nth 2 brkParams)
-                            brkText (nth 3 brkParams)
+                            brkBlock (nth 3 brkParams)
+                            brkSx (nth 4 brkParams)
+                            brkSy (nth 5 brkParams)
+                            brkSz (nth 6 brkParams)
+                            brkRot (nth 7 brkParams)
                             j 0)
                       (while (< j (sslength eligibleSS))
                         (setq eSel (ssname eligibleSS j))
-                        (setq breakMap (g6:applyBreakerToLine eSel breakMap gapW barH brkMode brkText))
+                        (setq breakMap (g6:applyBreakerToLine eSel breakMap gapW barH brkMode brkBlock brkSx brkSy brkSz brkRot))
                         (setq j (1+ j))
                       )
                     )
@@ -1598,7 +1646,7 @@
           (setq i 0)
           (while (< i (length entList))
             (setq userV (nth i userList))
-            (if (> userV 25.0)
+            (if (g6:dimensionEligibleP userV)
               (setq dimEligible (cons (nth i entList) dimEligible))
             )
             (setq i (1+ i))
@@ -1607,7 +1655,7 @@
           (if dimEligible
             (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
             (progn
-              (prompt "\nNo segments eligible for dimensions (>25).")
+              (prompt "\nNo segments eligible for dimensions (typed length >= 150).")
               (setq dimOff nil)
             )
           )
@@ -1624,7 +1672,7 @@
                 (while (< i (length entList))
                   (setq e (nth i entList))
                   (setq userV (nth i userList))
-                  (if (> userV 25.0)
+                  (if (g6:dimensionEligibleP userV)
                     (progn
                       (setq ed (entget e)
                             p1 (cdr (assoc 10 ed))
@@ -1697,17 +1745,16 @@
                   (setq againAns "No")
                   (progn
                     (setq suf (g6:promptSuffix lay))
-                    (prompt (strcat "\nSelect source G6 segments to move to layer \"" lay "\". Breaker helper lines are ignored."))
+                    (prompt (strcat "\nSelect source or tail G6 segments to move to layer \"" lay "\". Breaker helper lines are ignored."))
                     (setq selSS (ssget '((0 . "LINE"))))
                     (if selSS
                       (progn
-                        ;; Accept each actual current-run source line once; ignore break bars and tails.
+                        ;; Resolve source and tail selections once; ignore breaker marker helpers.
                         (setq selectedSources '()
                               j 0)
                         (while (< j (sslength selSS))
-                          (setq eSel (ssname selSS j)
-                                idxSel (g6:index-of eSel entList))
-                          (if (and (not (null idxSel)) (not (member eSel selectedSources)))
+                          (setq eSel (g6:resolveLayerSourceLine (ssname selSS j) entList breakMap))
+                          (if (and eSel (not (member eSel selectedSources)))
                             (setq selectedSources (cons eSel selectedSources))
                           )
                           (setq j (1+ j))
@@ -1735,7 +1782,7 @@
                               )
                             )
                           )
-                          (prompt "\nNo source G6 segments selected; breaker helper lines were ignored.")
+                          (prompt "\nNo source or tail G6 segments selected; breaker marker helpers were ignored.")
                         )
                       )
                       (prompt "\nNo selection made.")
@@ -1776,7 +1823,7 @@
                 (while (< i (length entList))
                   (setq e (nth i entList)
                         userV (nth i userList))
-                  (if (> userV 25.0)
+                  (if (g6:dimensionEligibleP userV)
                     (progn
                       (setq ed (entget e)
                             p1 (cdr (assoc 10 ed))

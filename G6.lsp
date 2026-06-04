@@ -307,6 +307,29 @@
   segs
 )
 
+(defun g6:setPreviewEntityStyle (ent / ed pair styled colorPair)
+  (if (and ent (setq ed (entget ent)))
+    (progn
+      ;; Remove true-color/color-book overrides so temporary DXF color 1 is visible.
+      (setq styled '())
+      (foreach pair ed
+        (if (not (member (car pair) '(420 430)))
+          (setq styled (cons pair styled))
+        )
+      )
+      (setq ed (reverse styled)
+            colorPair (assoc 62 ed))
+      (if colorPair
+        (setq ed (subst (cons 62 1) colorPair ed))
+        (setq ed (append ed (list (cons 62 1))))
+      )
+      (entmod ed)
+      (entupd ent)
+    )
+  )
+  ent
+)
+
 (defun g6:clearBreakPreview (preview / segs ents)
   (if preview
     (progn
@@ -325,6 +348,7 @@
       (setq pair (g6:createSelectedMarkerPair mid ang gapW barH templateEnt templateBase templateBaseH nil))
       (if (and pair (car pair) (cadr pair))
         (progn
+          (foreach previewEnt pair (g6:setPreviewEntityStyle previewEnt))
           (setq g6PreviewEnts pair)
           (list nil pair)
         )
@@ -398,14 +422,45 @@
   val
 )
 
-(defun g6:selectBreakerTemplate ( / sel ent basePt)
+(defun g6:getDefaultMarkerAnchor (ent pickPt / ed typ p1 p2 justH justV)
+  (if (and ent (setq ed (entget ent)))
+    (progn
+      (setq typ (cdr (assoc 0 ed)))
+      (cond
+        ((= typ "LINE")
+          (setq p1 (cdr (assoc 10 ed))
+                p2 (cdr (assoc 11 ed)))
+          (if (and p1 p2) (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2) pickPt)
+        )
+        ((= typ "TEXT")
+          (setq justH (if (assoc 72 ed) (cdr (assoc 72 ed)) 0)
+                justV (if (assoc 73 ed) (cdr (assoc 73 ed)) 0))
+          (if (and (or (/= justH 0) (/= justV 0)) (assoc 11 ed))
+            (cdr (assoc 11 ed))
+            (cdr (assoc 10 ed))
+          )
+        )
+        ((member typ '("MTEXT" "INSERT" "CIRCLE" "ARC" "POINT"))
+          (cdr (assoc 10 ed))
+        )
+        (T pickPt)
+      )
+    )
+    pickPt
+  )
+)
+
+(defun g6:selectBreakerTemplate (baseH / sel ent pickPt defaultAnchor anchor)
   (setq sel (entsel "\nSelect breaker marker object: "))
   (if sel
     (progn
       (setq ent (car sel)
-            basePt (cadr sel))
-      (if (and ent basePt (entget ent))
-        (list ent (g6:pt3 basePt))
+            pickPt (g6:pt3 (cadr sel))
+            defaultAnchor (g6:getDefaultMarkerAnchor ent pickPt)
+            anchor (getpoint "\nPick marker center/anchor point <selection point>: "))
+      (if (null anchor) (setq anchor defaultAnchor))
+      (if (and ent anchor (entget ent))
+        (list ent (g6:pt3 anchor) baseH)
       )
     )
   )
@@ -432,11 +487,11 @@
       (if modeAns (setq mode (strcase modeAns)))
       (if (= mode "SELECT")
         (progn
-          (setq templateParams (g6:selectBreakerTemplate))
+          (setq templateParams (g6:selectBreakerTemplate barH))
           (if templateParams
             (setq templateEnt (nth 0 templateParams)
                   templateBase (nth 1 templateParams)
-                  templateBaseH barH)
+                  templateBaseH (nth 2 templateParams))
             (progn
               (prompt "\nNo marker object selected; using Bars mode.")
               (setq mode "BARS")

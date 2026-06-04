@@ -3,7 +3,7 @@
 ;;; G6 (patched)
 ;;; Features:
 ;;;  - Draw chained LINE segments at fixed angles with typed lengths
-;;;  - Optional break markers as two LINE bars (||) or a selected block reference, size adjustable
+;;;  - Optional break markers as two LINE bars (||) or two copies of a selected object, size adjustable
 ;;;    with live preview and applies to selected lines (persisted).
 ;;;  - Continue/branch-from point: press C while in length input to pick a connected start point without ending.
 ;;;  - Dimensions with satisfaction loop (re-pick offset distance).
@@ -74,26 +74,34 @@
 (defun g6:ptNear (p q tol) (< (distance (g6:pt3 p) (g6:pt3 q)) tol))
 (defun g6:vecNear (v1 v2 tol) (< (distance (g6:pt3 v1) (g6:pt3 v2)) tol))
 
-(defun g6:translateEntity (e vec / ed p10 p11)
+(defun g6:translateEntity (e vec / ss base to)
+  ;; Native MOVE supports any normal AutoCAD entity that can be selected.
+  (if (and e (entget e))
+    (progn
+      (setq ss (ssadd e)
+            base '(0.0 0.0 0.0)
+            to (g6:pt3 vec))
+      (if ss (command "_.MOVE" ss "" base to))
+    )
+  )
+)
+
+(defun g6:translateLine (e vec / ed p1 p2)
   (if (and e (entget e))
     (progn
       (setq ed (entget e)
-            p10 (assoc 10 ed)
-            p11 (assoc 11 ed))
-      (if p10 (setq ed (subst (cons 10 (g6:pt+ (cdr p10) vec)) p10 ed)))
-      (if p11 (setq ed (subst (cons 11 (g6:pt+ (cdr p11) vec)) p11 ed)))
-      (if (or p10 p11)
+            p1 (cdr (assoc 10 ed))
+            p2 (cdr (assoc 11 ed)))
+      (if (and p1 p2)
         (progn
+          (setq ed (subst (cons 10 (g6:pt+ p1 vec)) (assoc 10 ed) ed))
+          (setq ed (subst (cons 11 (g6:pt+ p2 vec)) (assoc 11 ed) ed))
           (entmod ed)
           (entupd e)
         )
       )
     )
   )
-)
-
-(defun g6:translateLine (e vec)
-  (g6:translateEntity e vec)
 )
 
 ;;; ------------------------------------------------------------
@@ -116,7 +124,7 @@
 
 ;;; ------------------------------------------------------------
 ;;; Break parameters and live preview
-;;; params = (gapW barH mode blockName scaleX scaleY scaleZ rotation)
+;;; params = (gapW barH mode templateEnt templateBasePt)
 ;;; ------------------------------------------------------------
 (defun g6:getBreakMode ( / mode)
   (setq mode (getenv "G6_BRK_MODE"))
@@ -128,43 +136,12 @@
   (if (member mode '("BARS" "SELECT")) (setenv "G6_BRK_MODE" mode))
 )
 
-(defun g6:getEnvNumber (key def / val)
-  (setq val (getenv key))
-  (if (and val (/= val "")) (atof val) def)
-)
-
-(defun g6:setEnvNumber (key val)
-  (setenv key (rtos val 2 8))
-)
-
-(defun g6:getBreakBlock ( / name)
-  (setq name (getenv "G6_BRK_BLOCK"))
-  (if (and name (/= name "") (tblsearch "BLOCK" name)) name nil)
-)
-
-(defun g6:setBreakBlockParams (name sx sy sz rot)
-  (if (and name (tblsearch "BLOCK" name))
-    (progn
-      (setenv "G6_BRK_BLOCK" name)
-      (g6:setEnvNumber "G6_BRK_BLOCK_SX" sx)
-      (g6:setEnvNumber "G6_BRK_BLOCK_SY" sy)
-      (g6:setEnvNumber "G6_BRK_BLOCK_SZ" sz)
-      (g6:setEnvNumber "G6_BRK_BLOCK_ROT" rot)
-    )
-  )
-)
-
-(defun g6:breakParamsDefault ( / gapW barH mode blockName sx sy sz rot)
+(defun g6:breakParamsDefault ( / gapW barH mode)
   (setq gapW (g6:getEnvReal "G6_BRK_GAPW" 0.12)
         barH (g6:getEnvReal "G6_BRK_BARH" 0.10)
-        mode (g6:getBreakMode)
-        blockName (g6:getBreakBlock)
-        sx (g6:getEnvNumber "G6_BRK_BLOCK_SX" 1.0)
-        sy (g6:getEnvNumber "G6_BRK_BLOCK_SY" 1.0)
-        sz (g6:getEnvNumber "G6_BRK_BLOCK_SZ" 1.0)
-        rot (g6:getEnvNumber "G6_BRK_BLOCK_ROT" 0.0))
-  (if (and (= mode "SELECT") (null blockName)) (setq mode "BARS"))
-  (list gapW barH mode blockName sx sy sz rot)
+        mode (g6:getBreakMode))
+  ;; Selected entity names are drawing/session-specific, so only the mode is persisted.
+  (list gapW barH mode nil nil)
 )
 (defun g6:dimensionEligibleP (userLen)
   (and userLen (>= userLen 150.0))
@@ -391,42 +368,32 @@
   val
 )
 
-(defun g6:selectBreakerBlock ( / sel ent ed)
-  (setq sel (entsel "\nSelect breaker marker object (block reference): "))
+(defun g6:selectBreakerTemplate ( / sel ent basePt)
+  (setq sel (entsel "\nSelect breaker marker object: "))
   (if sel
     (progn
       (setq ent (car sel)
-            ed (entget ent))
-      (if (= (cdr (assoc 0 ed)) "INSERT")
-        (list (cdr (assoc 2 ed))
-              (if (assoc 41 ed) (cdr (assoc 41 ed)) 1.0)
-              (if (assoc 42 ed) (cdr (assoc 42 ed)) 1.0)
-              (if (assoc 43 ed) (cdr (assoc 43 ed)) 1.0)
-              (if (assoc 50 ed) (cdr (assoc 50 ed)) 0.0))
-        (progn
-          (prompt "\nSelected marker must be a block reference (INSERT); using Bars mode.")
-          nil
-        )
+            basePt (cadr sel))
+      (if (and ent basePt (entget ent))
+        (list ent (g6:pt3 basePt))
       )
     )
   )
 )
 
-(defun g6:pickBreakParams (sampleEnt params / ed p1 p2 mid ang gapW barH mode blockName sx sy sz rot modeAns blockParams v ans ok)
+(defun g6:pickBreakParams (sampleEnt params / ed p1 p2 mid ang gapW barH mode templateEnt templateBase modeAns templateParams v ans ok)
   (setq ed (entget sampleEnt)
         p1 (cdr (assoc 10 ed))
         p2 (cdr (assoc 11 ed))
         gapW (nth 0 params)
         barH (nth 1 params)
         mode (nth 2 params)
-        blockName (nth 3 params)
-        sx (nth 4 params)
-        sy (nth 5 params)
-        sz (nth 6 params)
-        rot (nth 7 params)
+        templateEnt (nth 3 params)
+        templateBase (nth 4 params)
         ok nil)
   (if (not (member mode '("BARS" "SELECT"))) (setq mode "BARS"))
-  (if (and (= mode "SELECT") (or (null blockName) (null (tblsearch "BLOCK" blockName)))) (setq mode "BARS"))
+  (if (and (= mode "SELECT") (or (null templateEnt) (null (entget templateEnt)) (null templateBase)))
+    (setq templateEnt nil templateBase nil))
   (if (and p1 p2)
     (progn
       (initget "Bars Select")
@@ -434,14 +401,14 @@
       (if modeAns (setq mode (strcase modeAns)))
       (if (= mode "SELECT")
         (progn
-          (setq blockParams (g6:selectBreakerBlock))
-          (if blockParams
-            (setq blockName (nth 0 blockParams)
-                  sx (nth 1 blockParams)
-                  sy (nth 2 blockParams)
-                  sz (nth 3 blockParams)
-                  rot (nth 4 blockParams))
-            (setq mode "BARS")
+          (setq templateParams (g6:selectBreakerTemplate))
+          (if templateParams
+            (setq templateEnt (nth 0 templateParams)
+                  templateBase (nth 1 templateParams))
+            (progn
+              (prompt "\nNo marker object selected; using Bars mode.")
+              (setq mode "BARS")
+            )
           )
         )
       )
@@ -462,7 +429,7 @@
             (initget "Yes No")
             (setq ans (getkword "\nBreaker size OK? [Yes/No] <Yes>: "))
             (if (or (null ans) (= ans "Yes"))
-              (setq ok T params (list gapW barH mode blockName sx sy sz rot))
+              (setq ok T params (list gapW barH mode templateEnt templateBase))
             )
           )
         )
@@ -474,8 +441,6 @@
       (g6:setEnvReal "G6_BRK_GAPW" (nth 0 params))
       (g6:setEnvReal "G6_BRK_BARH" (nth 1 params))
       (g6:setBreakMode (nth 2 params))
-      (if (= (nth 2 params) "SELECT")
-        (g6:setBreakBlockParams (nth 3 params) (nth 4 params) (nth 5 params) (nth 6 params) (nth 7 params)))
     )
   )
   params
@@ -508,32 +473,46 @@
   )
 )
 
-(defun g6:createBreakerBlock (lineEnt blockName sx sy sz rot / ed p1 p2 mid ang lay markerEnt)
+(defun g6:copyEntityToPoint (templateEnt templateBase targetPt / before copied)
+  (if (and templateEnt (entget templateEnt) templateBase targetPt)
+    (progn
+      (setq before (entlast))
+      (command "_.COPY" templateEnt "" templateBase targetPt)
+      (setq copied (entlast))
+      (if (eq copied before) nil copied)
+    )
+  )
+)
+
+(defun g6:createBreakerSelected (lineEnt gapW templateEnt templateBase / ed p1 p2 lay mid ang c1 c2 marker1 marker2)
   (setq ed (entget lineEnt)
         p1 (cdr (assoc 10 ed))
         p2 (cdr (assoc 11 ed))
         lay (cdr (assoc 8 ed)))
   (if (null lay) (setq lay "0"))
-  (if (and p1 p2 blockName (tblsearch "BLOCK" blockName))
+  (if (and p1 p2 templateEnt (entget templateEnt) templateBase)
     (progn
       (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
             ang (angle p1 p2)
-            markerEnt (entmakex (list (cons 0 "INSERT") (cons 8 lay) (cons 2 blockName)
-                                      (cons 10 mid) (cons 41 sx) (cons 42 sy) (cons 43 sz)
-                                      (cons 50 (+ ang rot)))))
-      (list markerEnt nil)
+            c1 (polar mid (+ ang pi) (/ gapW 2.0))
+            c2 (polar mid ang (/ gapW 2.0))
+            marker1 (g6:copyEntityToPoint templateEnt templateBase c1)
+            marker2 (g6:copyEntityToPoint templateEnt templateBase c2))
+      (g6:setLayerEnt marker1 lay)
+      (g6:setLayerEnt marker2 lay)
+      (list marker1 marker2)
     )
   )
 )
 
-(defun g6:createBreakerMarker (lineEnt gapW barH mode blockName sx sy sz rot)
+(defun g6:createBreakerMarker (lineEnt gapW barH mode templateEnt templateBase)
   (if (= mode "SELECT")
-    (g6:createBreakerBlock lineEnt blockName sx sy sz rot)
+    (g6:createBreakerSelected lineEnt gapW templateEnt templateBase)
     (g6:createBreakerBars lineEnt gapW barH)
   )
 )
 
-(defun g6:applyBreakerToLine (eSel breakMap gapW barH mode blockName sx sy sz rot / brkPair oldTail oldTailEd oldTailEnd oldLineEd ed p1 p2 lay lineLen gapUse mid ang g1 g2 markers tailEnt be)
+(defun g6:applyBreakerToLine (eSel breakMap gapW barH mode templateEnt templateBase / brkPair oldTail oldTailEd oldTailEnd oldLineEd ed p1 p2 lay lineLen gapUse mid ang g1 g2 markers tailEnt be)
   (setq brkPair (assoc eSel breakMap))
   (if brkPair
     (progn
@@ -574,7 +553,7 @@
             g1 (polar mid (+ ang pi) (/ gapUse 2.0))
             g2 (polar mid ang (/ gapUse 2.0)))
 
-      (setq markers (g6:createBreakerMarker eSel gapUse barH mode blockName sx sy sz rot))
+      (setq markers (g6:createBreakerMarker eSel gapUse barH mode templateEnt templateBase))
 
       (setq ed (subst (cons 11 g1) (assoc 11 ed) ed))
       (entmod ed)
@@ -1127,7 +1106,7 @@
 
 ;;; ------------------------------------------------------------
 ;;; Break map helpers
-;;; breakMap: alist (lineEnt . (marker1Ent marker2Ent-or-nil tailEnt))
+;;; breakMap: alist (lineEnt . (marker1Ent marker2Ent tailEnt))
 ;;; ------------------------------------------------------------
 (defun g6:deleteBreaks (breakMap / pair ents)
   (while breakMap
@@ -1241,7 +1220,7 @@
                i e userLen len nextpt
                dimOff dimOk dimEnts dimMap dimEligible dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV tailEnt
                layAns lay suf againAns selSS selectedSources j eSel idxSel brkPair dimE txtOvr be
-               brkAns brkSS eligibleSS entCandidate brkParams gapW barH brkMode brkBlock brkSx brkSy brkSz brkRot
+               brkAns brkSS eligibleSS entCandidate brkParams gapW barH brkMode brkTemplate brkTemplateBase
                shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
                shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen shortPt dist
                segStack shortLoop shortOk shortRollback shortMarkPlaced reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
@@ -1553,13 +1532,10 @@
                             (setq gapW (nth 0 brkParams)
                                   barH (nth 1 brkParams)
                                   brkMode (nth 2 brkParams)
-                                  brkBlock (nth 3 brkParams)
-                                  brkSx (nth 4 brkParams)
-                                  brkSy (nth 5 brkParams)
-                                  brkSz (nth 6 brkParams)
-                                  brkRot (nth 7 brkParams))
+                                  brkTemplate (nth 3 brkParams)
+                                  brkTemplateBase (nth 4 brkParams))
                             (foreach shortEnt shortTargets
-                              (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH brkMode brkBlock brkSx brkSy brkSz brkRot))
+                              (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH brkMode brkTemplate brkTemplateBase))
                             )
                           )
                         )
@@ -1618,15 +1594,12 @@
                       (setq gapW (nth 0 brkParams)
                             barH (nth 1 brkParams)
                             brkMode (nth 2 brkParams)
-                            brkBlock (nth 3 brkParams)
-                            brkSx (nth 4 brkParams)
-                            brkSy (nth 5 brkParams)
-                            brkSz (nth 6 brkParams)
-                            brkRot (nth 7 brkParams)
+                            brkTemplate (nth 3 brkParams)
+                            brkTemplateBase (nth 4 brkParams)
                             j 0)
                       (while (< j (sslength eligibleSS))
                         (setq eSel (ssname eligibleSS j))
-                        (setq breakMap (g6:applyBreakerToLine eSel breakMap gapW barH brkMode brkBlock brkSx brkSy brkSz brkRot))
+                        (setq breakMap (g6:applyBreakerToLine eSel breakMap gapW barH brkMode brkTemplate brkTemplateBase))
                         (setq j (1+ j))
                       )
                     )

@@ -92,6 +92,21 @@
   )
 )
 
+(defun g6:translateEntity (e vec / ss oldCmdecho)
+  ;; MOVE supports picked marker types whose geometry is not stored in LINE DXF 10/11 fields.
+  (if (and e (entget e) vec)
+    (progn
+      (setq ss (ssadd)
+            oldCmdecho (getvar "CMDECHO"))
+      (ssadd e ss)
+      (setvar "CMDECHO" 0)
+      (command "_.MOVE" ss "" '(0.0 0.0 0.0) (g6:pt3 vec))
+      (setvar "CMDECHO" oldCmdecho)
+      T
+    )
+  )
+)
+
 ;;; ------------------------------------------------------------
 ;;; ENV helpers (reals)
 ;;; ------------------------------------------------------------
@@ -1022,7 +1037,8 @@
   (setq brkPair (assoc lineEnt breakMap))
   (if brkPair
     (foreach be (cdr brkPair)
-      (g6:translateLine be delta)
+      ;; Marker copies may be TEXT, INSERT, CIRCLE, ARC, polylines, or other entities.
+      (g6:translateEntity be delta)
     )
   )
   (setq dimE (cdr (assoc lineEnt dimMap)))
@@ -1221,7 +1237,12 @@
     (princ)
   )
 
-  (setq oldOsmode  (getvar "OSMODE")
+  ;; Remove any temporary entities retained by an interrupted prior run, then initialize tracking.
+  (g6:cleanupBreakPreview)
+  (g6:cleanupBreakWork)
+  (setq *g6-break-preview* nil
+        *g6-break-work* nil
+        oldOsmode  (getvar "OSMODE")
         oldCmdecho (getvar "CMDECHO"))
   (setvar "CMDECHO" 0)
 

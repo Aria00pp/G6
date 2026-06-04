@@ -188,13 +188,16 @@
 )
 
 (defun g6:pickDimOffsetPreview (eligible breakMap / done gr typ dat typed ref refMid refPerp vec off cand oldSegs)
+  ;; Finish any ordinary command before grread consumes dimension-offset input.
+  (while (= 1 (logand 1 (getvar "CMDACTIVE"))) (command))
   (setq done nil off nil typed "" oldSegs '())
   (setq ref (g6:firstDimRef eligible breakMap)
         refMid (if ref (car ref) nil)
         refPerp (if ref (cadr ref) nil))
   (prompt "\nDimension offset (move mouse / type / click, ESC = none): ")
   (while (not done)
-    (setq gr (grread T 13 0)
+    ;; Include the all-keys bit so unsupported keys are consumed here, not by AutoCAD.
+    (setq gr (grread T 15 0)
           typ (car gr)
           dat (cadr gr))
     (cond
@@ -1119,9 +1122,8 @@
                entList userList chainList breakMap
                i e userLen len nextpt
                dimOff dimOk dimEnts dimMap dimEligible dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV tailEnt
-               layAns lay suf againAns selSS j eSel idxSel brkPair dimE txtOvr be
+               layAns lay suf againAns selSS selectedSources j eSel idxSel brkPair dimE txtOvr be
                brkAns brkSS eligibleSS entCandidate brkParams gapW barH bars
-               resolvedSel
                shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
                shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen shortPt dist
                segStack shortLoop shortOk shortRollback shortMarkPlaced reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
@@ -1613,38 +1615,45 @@
                   (setq againAns "No")
                   (progn
                     (setq suf (g6:promptSuffix lay))
-                    (prompt (strcat "\nSelect segments to move to layer \"" lay "\". Press Enter when done."))
+                    (prompt (strcat "\nSelect source G6 segments to move to layer \"" lay "\". Breaker helper lines are ignored."))
                     (setq selSS (ssget '((0 . "LINE"))))
                     (if selSS
                       (progn
-                        (setq j 0)
+                        ;; Accept each actual current-run source line once; ignore break bars and tails.
+                        (setq selectedSources '()
+                              j 0)
                         (while (< j (sslength selSS))
-                          (setq eSel (ssname selSS j))
-                          (setq resolvedSel (g6:resolveSourceLine eSel entList breakMap))
-                          (setq idxSel (if resolvedSel (g6:index-of resolvedSel entList) nil))
-                          (if (not (null idxSel))
-                            (progn
-                              (g6:setLayerEnt resolvedSel lay)
+                          (setq eSel (ssname selSS j)
+                                idxSel (g6:index-of eSel entList))
+                          (if (and (not (null idxSel)) (not (member eSel selectedSources)))
+                            (setq selectedSources (cons eSel selectedSources))
+                          )
+                          (setq j (1+ j))
+                        )
 
-                              ;; breaks for that line (if any)
-                              (setq brkPair (assoc resolvedSel breakMap))
-                              (if brkPair
-                                (foreach be (cdr brkPair) (g6:setLayerEnt be lay))
-                              )
+                        (if selectedSources
+                          (foreach eSel (reverse selectedSources)
+                            (setq idxSel (g6:index-of eSel entList))
+                            (g6:setLayerEnt eSel lay)
 
-                              ;; dimension + suffix (if any)
-                              (setq dimE (cdr (assoc resolvedSel dimMap)))
-                              (if dimE
-                                (progn
-                                  (g6:setLayerEnt dimE lay)
-                                  (setq userV (nth idxSel userList))
-                                  (setq txtOvr (if (< userV 120.0) (g6:fmtLen userV) (strcat (g6:fmtLen userV) suf)))
-                                  (g6:setDimText dimE txtOvr)
-                                )
+                            ;; breaks and tail for that source line (if any)
+                            (setq brkPair (assoc eSel breakMap))
+                            (if brkPair
+                              (foreach be (cdr brkPair) (g6:setLayerEnt be lay))
+                            )
+
+                            ;; dimension + suffix (if any)
+                            (setq dimE (cdr (assoc eSel dimMap)))
+                            (if dimE
+                              (progn
+                                (g6:setLayerEnt dimE lay)
+                                (setq userV (nth idxSel userList))
+                                (setq txtOvr (if (< userV 120.0) (g6:fmtLen userV) (strcat (g6:fmtLen userV) suf)))
+                                (g6:setDimText dimE txtOvr)
                               )
                             )
                           )
-                          (setq j (1+ j))
+                          (prompt "\nNo source G6 segments selected; breaker helper lines were ignored.")
                         )
                       )
                       (prompt "\nNo selection made.")

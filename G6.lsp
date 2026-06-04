@@ -516,11 +516,13 @@
   )
 )
 
-(defun g6:rotateEntityAround (ent basePt ang / ss)
+(defun g6:rotateEntityAround (ent basePt ang / ss commandAng)
   (if (and ent (entget ent) basePt ang)
     (progn
-      (setq ss (ssadd ent))
-      (if ss (command "_.ROTATE" ss "" basePt ang))
+      ;; Geometry angles are radians; the command-line ROTATE angle is degrees.
+      (setq ss (ssadd ent)
+            commandAng (g6:rad->deg ang))
+      (if ss (command "_.ROTATE" ss "" basePt commandAng))
     )
   )
   ent

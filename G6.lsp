@@ -1091,12 +1091,12 @@
                ptsStack entStack lenStack userLenStack chainStack chainId
                entList userList chainList breakMap
                i e userLen len nextpt
-               dimOff dimOk dimEnts dimMap dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV
-               layAns lay suf againAns selSS j eSel idxSel brkPair dimE txtOvr
+               dimOff dimOk dimEnts dimMap dimEligible dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV tailEnt
+               layAns lay suf againAns selSS j eSel idxSel brkPair dimE txtOvr be
                brkAns brkSS eligibleSS entCandidate brkParams gapW barH bars
                resolvedSel
                shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
-               shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen pt dist
+               shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen shortPt dist
                segStack shortLoop shortOk shortRollback shortMarkPlaced reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
                )
 
@@ -1341,12 +1341,12 @@
                               (setq shortEndpoints (g6:endpointsFromLineRecs shortRecs)
                                     userCapLen (* shortCap scaleFactor)
                                     requiredCapLen 0.0)
-                              (foreach pt shortEndpoints
-                                (if (and (not (g6:ptNear pt anchor tol))
-                                         (not (g6:ptNear pt oldEnd tol))
-                                         (g6:pointOnSegment pt anchor oldEnd tol))
+                              (foreach shortPt shortEndpoints
+                                (if (and (not (g6:ptNear shortPt anchor tol))
+                                         (not (g6:ptNear shortPt oldEnd tol))
+                                         (g6:pointOnSegment shortPt anchor oldEnd tol))
                                   (progn
-                                    (setq dist (distance (g6:pt3 anchor) (g6:pt3 pt)))
+                                    (setq dist (distance (g6:pt3 anchor) (g6:pt3 shortPt)))
                                     (if (> dist requiredCapLen) (setq requiredCapLen dist))
                                   )
                                 )

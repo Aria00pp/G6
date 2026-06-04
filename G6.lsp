@@ -3,7 +3,7 @@
 ;;; G6 (patched)
 ;;; Features:
 ;;;  - Draw chained LINE segments at fixed angles with typed lengths
-;;;  - Optional break markers as two LINE bars (||), size adjustable with live preview
+;;;  - Optional picked-object break markers, size adjustable with live preview
 ;;;    and applies to selected lines (persisted).
 ;;;  - Continue/branch-from point: press C while in length input to pick a connected start point without ending.
 ;;;  - Dimensions with satisfaction loop (re-pick offset distance).
@@ -54,7 +54,8 @@
       (setq src nil)
       (while (and breakMap (null src))
         (setq pair (car breakMap))
-        (if (member eSel (cdr pair)) (setq src (car pair)))
+        ;; Only the tail resolves to its source; marker copies must remain inert.
+        (if (eq eSel (nth 2 (cdr pair))) (setq src (car pair)))
         (setq breakMap (cdr breakMap))
       )
       src
@@ -111,12 +112,12 @@
 
 ;;; ------------------------------------------------------------
 ;;; Break parameters and live preview
-;;; params = (gapW barH)
+;;; params = (gapW markerScale)
 ;;; ------------------------------------------------------------
-(defun g6:breakParamsDefault ( / gapW barH)
+(defun g6:breakParamsDefault ( / gapW markerScale)
   (setq gapW (g6:getEnvReal "G6_BRK_GAPW" 0.12))
-  (setq barH (g6:getEnvReal "G6_BRK_BARH" 0.10))
-  (list gapW barH)
+  (setq markerScale (g6:getEnvReal "G6_BRK_SCALE" 1.0))
+  (list gapW markerScale)
 )
 
 (defun g6:drawPreviewSegs (segs col)
@@ -265,27 +266,139 @@
   )
 )
 
-(defun g6:previewBreakSegs (mid ang gapW barH / ux uy vx vy b1 b2 t1 t2 segs)
-  (setq ux (cos ang) uy (sin ang))
-  (setq vx (- (sin ang)) vy (cos ang))
-  (setq b1 (list (+ (car mid) (* ux (- (/ gapW 2.0)))) (+ (cadr mid) (* uy (- (/ gapW 2.0)))) 0.0))
-  (setq b2 (list (+ (car mid) (* ux (/ gapW 2.0))) (+ (cadr mid) (* uy (/ gapW 2.0))) 0.0))
-  (setq t1 (list (+ (car b1) (* vx (- (/ barH 2.0)))) (+ (cadr b1) (* vy (- (/ barH 2.0)))) 0.0))
-  (setq t2 (list (+ (car b1) (* vx (/ barH 2.0))) (+ (cadr b1) (* vy (/ barH 2.0))) 0.0))
-  (setq segs (list (list t1 t2)))
-  (setq t1 (list (+ (car b2) (* vx (- (/ barH 2.0)))) (+ (cadr b2) (* vy (- (/ barH 2.0)))) 0.0))
-  (setq t2 (list (+ (car b2) (* vx (/ barH 2.0))) (+ (cadr b2) (* vy (/ barH 2.0))) 0.0))
-  (setq segs (append segs (list (list t1 t2))))
-  segs
+(defun g6:deleteEnts (ents / e)
+  (foreach e ents
+    (if (and e (entget e)) (entdel e))
+  )
 )
 
-(defun g6:pickBreakOneValue (msg mid ang gapW barH mode / oldSegs done val typed gr typ dat vec dotv)
-  (setq val (if (= mode "GAP") gapW barH))
-  (setq typed "")
-  (setq oldSegs (g6:previewBreakSegs mid ang gapW barH))
-  (g6:drawPreviewSegs oldSegs 1)
-  (prompt msg)
-  (setq done nil)
+(defun g6:cleanupBreakPreview ()
+  (if *g6-break-preview*
+    (g6:deleteEnts *g6-break-preview*)
+  )
+  (setq *g6-break-preview* nil)
+)
+
+(defun g6:cleanupBreakWork ()
+  (if *g6-break-work*
+    (g6:deleteEnts *g6-break-work*)
+  )
+  (setq *g6-break-work* nil)
+)
+
+(defun g6:setEntColor (e col / ed old)
+  (if (and e (setq ed (entget e)))
+    (progn
+      (setq old (assoc 62 ed))
+      (if old
+        (setq ed (subst (cons 62 col) old ed))
+        (setq ed (append ed (list (cons 62 col))))
+      )
+      (entmod ed)
+      (entupd e)
+    )
+  )
+)
+
+(defun g6:copyMarkerAt (marker anchor target ang markerScale lay preview / before copied)
+  (setq before (entlast))
+  (command "_.COPY" marker "" anchor target "")
+  (setq copied (entlast))
+  (if (or (null copied) (eq copied before) (null (entget copied)))
+    nil
+    (progn
+      ;; Track an in-progress copy so the command error handler can remove it.
+      (setq *g6-break-work* (cons copied *g6-break-work*))
+      (command "_.ROTATE" copied "" target (g6:rad->deg ang))
+      (if (and copied (entget copied))
+        (command "_.SCALE" copied "" target markerScale)
+      )
+      (if (and copied (entget copied))
+        (progn
+          (if preview
+            (g6:setEntColor copied 1)
+            (g6:setLayerEnt copied lay)
+          )
+          copied
+        )
+        nil
+      )
+    )
+  )
+)
+
+(defun g6:createMarkerPairAtEnds (marker anchor p1 p2 gapW markerScale lay preview / mid ang c1 c2 m1 m2)
+  (g6:cleanupBreakWork)
+  (if (and marker (entget marker) anchor p1 p2 (> markerScale 0.0))
+    (progn
+      (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
+            ang (angle p1 p2)
+            c1 (polar mid (+ ang pi) (/ gapW 2.0))
+            c2 (polar mid ang (/ gapW 2.0))
+            m1 (g6:copyMarkerAt marker anchor c1 ang markerScale lay preview))
+      (if m1
+        (setq m2 (g6:copyMarkerAt marker anchor c2 ang markerScale lay preview))
+      )
+      (if (and m1 m2)
+        (list m1 m2)
+        (progn
+          (g6:deleteEnts (list m1 m2))
+          (setq *g6-break-work* nil)
+          nil
+        )
+      )
+    )
+  )
+)
+
+(defun g6:updateBreakPreview (sampleEnt marker anchor gapW markerScale / ed p1 p2 lay)
+  (g6:cleanupBreakPreview)
+  (if (and sampleEnt (setq ed (entget sampleEnt)))
+    (progn
+      (setq p1 (cdr (assoc 10 ed))
+            p2 (cdr (assoc 11 ed))
+            lay (cdr (assoc 8 ed)))
+      (setq *g6-break-preview*
+        (g6:createMarkerPairAtEnds marker anchor p1 p2 gapW markerScale lay T))
+      (setq *g6-break-work* nil)
+    )
+  )
+  *g6-break-preview*
+)
+
+(defun g6:pickBreakerMarker (/ picked marker selectPt anchor)
+  (setq picked (entsel "\nSelect breaker marker object: "))
+  (if picked
+    (progn
+      (setq marker (car picked)
+            selectPt (cadr picked))
+      (if (and marker (entget marker) selectPt)
+        (progn
+          (setq anchor (getpoint "\nPick marker center/anchor point <selection point>: "))
+          (if (null anchor) (setq anchor selectPt))
+          (list marker anchor)
+        )
+      )
+    )
+  )
+)
+
+(defun g6:pickBreakOneValue (msg sampleEnt marker anchor gapW markerScale mode / ed p1 p2 mid ang done val typed gr typ dat vec dotv)
+  (setq ed (entget sampleEnt)
+        p1 (cdr (assoc 10 ed))
+        p2 (cdr (assoc 11 ed))
+        mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
+        ang (angle p1 p2)
+        val (if (= mode "GAP") gapW markerScale)
+        typed ""
+        done nil)
+  (if (null (g6:updateBreakPreview sampleEnt marker anchor gapW markerScale))
+    (progn
+      (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
+      (setq val nil done T)
+    )
+  )
+  (if (not done) (prompt msg))
   (while (not done)
     (setq gr (grread T 13 0) typ (car gr) dat (cadr gr))
     (cond
@@ -298,10 +411,16 @@
               (setq dotv (+ (* (car vec) (- (sin ang))) (* (cadr vec) (cos ang))))
             )
             (setq val (max 0.001 (* 2.0 (abs dotv))))
-            (if (= mode "GAP") (setq gapW val) (setq barH val))
-            (g6:drawPreviewSegs oldSegs 0)
-            (setq oldSegs (g6:previewBreakSegs mid ang gapW barH))
-            (g6:drawPreviewSegs oldSegs 1)
+            (if (= mode "GAP") (setq gapW val) (setq markerScale val))
+            (if (null (g6:updateBreakPreview sampleEnt marker anchor gapW markerScale))
+              (progn
+                (progn
+          (g6:cleanupBreakWork)
+          (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
+        )
+                (setq val nil done T)
+              )
+            )
           )
         )
       )
@@ -311,164 +430,125 @@
           ((= dat 13) (setq done T))
           ((= dat 27) (setq val nil done T))
           ((= dat 8)
-            (if (> (strlen typed) 0)
-              (setq typed (substr typed 1 (1- (strlen typed))))
-            )
+            (if (> (strlen typed) 0) (setq typed (substr typed 1 (1- (strlen typed)))))
             (if (> (strlen typed) 0)
               (progn
                 (setq val (max 0.001 (atof typed)))
-                (if (= mode "GAP") (setq gapW val) (setq barH val))
-                (g6:drawPreviewSegs oldSegs 0)
-                (setq oldSegs (g6:previewBreakSegs mid ang gapW barH))
-                (g6:drawPreviewSegs oldSegs 1)
+                (if (= mode "GAP") (setq gapW val) (setq markerScale val))
+                (if (null (g6:updateBreakPreview sampleEnt marker anchor gapW markerScale))
+                  (setq val nil done T)
+                )
               )
             )
           )
           ((or (and (>= dat 48) (<= dat 57)) (= dat 46))
-            (setq typed (strcat typed (chr dat)))
-            (setq val (max 0.001 (atof typed)))
-            (if (= mode "GAP") (setq gapW val) (setq barH val))
-            (g6:drawPreviewSegs oldSegs 0)
-            (setq oldSegs (g6:previewBreakSegs mid ang gapW barH))
-            (g6:drawPreviewSegs oldSegs 1)
+            (setq typed (strcat typed (chr dat))
+                  val (max 0.001 (atof typed)))
+            (if (= mode "GAP") (setq gapW val) (setq markerScale val))
+            (if (null (g6:updateBreakPreview sampleEnt marker anchor gapW markerScale))
+              (setq val nil done T)
+            )
           )
         )
       )
     )
   )
-  (g6:drawPreviewSegs oldSegs 0)
+  (g6:cleanupBreakPreview)
   val
 )
 
-(defun g6:pickBreakParams (sampleEnt params / ed p1 p2 mid ang gapW barH v ans ok)
-  (setq ed (entget sampleEnt)
-        p1 (cdr (assoc 10 ed))
-        p2 (cdr (assoc 11 ed))
+(defun g6:pickBreakParams (sampleEnt markerInfo params / marker anchor gapW markerScale v ans ok)
+  (setq marker (car markerInfo)
+        anchor (cadr markerInfo)
         gapW (nth 0 params)
-        barH (nth 1 params)
+        markerScale (nth 1 params)
         ok nil)
-  (if (and p1 p2)
-    (progn
-      (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
-            ang (angle p1 p2))
-      (while (not ok)
-        (setq v (g6:pickBreakOneValue "\nPick breaker width (gapW): move/click or type value, Enter=accept, Esc=cancel. " mid ang gapW barH "GAP"))
-        (if (null v)
-          (setq ok 'CANCEL)
-          (setq gapW v)
-        )
-        (if (not (eq ok 'CANCEL))
-          (progn
-            (setq v (g6:pickBreakOneValue "\nPick breaker height (barH): move/click or type value, Enter=accept, Esc=cancel. " mid ang gapW barH "BAR"))
-            (if (null v)
-              (setq ok 'CANCEL)
-              (setq barH v)
-            )
-          )
-        )
-        (if (eq ok 'CANCEL)
-          (setq ok T params nil)
-          (progn
-            (initget "Yes No")
-            (setq ans (getkword "\nBreaker size OK? [Yes/No] <Yes>: "))
-            (if (or (null ans) (= ans "Yes"))
-              (setq ok T params (list gapW barH))
-            )
-          )
+  (while (not ok)
+    (setq v (g6:pickBreakOneValue "\nPick breaker width/spacing: move/click or type value, Enter=accept, Esc=cancel. " sampleEnt marker anchor gapW markerScale "GAP"))
+    (if (null v) (setq ok 'CANCEL) (setq gapW v))
+    (if (not (eq ok 'CANCEL))
+      (progn
+        (setq v (g6:pickBreakOneValue "\nPick breaker marker scale: move/click or type value, Enter=accept, Esc=cancel. " sampleEnt marker anchor gapW markerScale "SCALE"))
+        (if (null v) (setq ok 'CANCEL) (setq markerScale v))
+      )
+    )
+    (if (eq ok 'CANCEL)
+      (setq ok T params nil)
+      (progn
+        (initget "Yes No")
+        (setq ans (getkword "\nBreaker size OK? [Yes/No] <Yes>: "))
+        (if (or (null ans) (= ans "Yes"))
+          (setq ok T params (list gapW markerScale))
         )
       )
     )
   )
+  (g6:cleanupBreakPreview)
   (if params
     (progn
       (g6:setEnvReal "G6_BRK_GAPW" (nth 0 params))
-      (g6:setEnvReal "G6_BRK_BARH" (nth 1 params))
+      (g6:setEnvReal "G6_BRK_SCALE" (nth 1 params))
     )
   )
   params
 )
 
-(defun g6:createBreakerBars (lineEnt gapW barH / ed p1 p2 mid ang ux uy vx vy c1 c2 s1 e1 s2 e2 lay b1 b2)
-  (setq ed (entget lineEnt)
+(defun g6:applyBreakerToLine (eSel breakMap markerInfo gapW markerScale / brkPair oldTail oldTailEd oldTailEnd ed p1 p2 lay lineLen gapUse mid ang g1 g2 markers tailEnt be marker anchor)
+  (setq brkPair (assoc eSel breakMap)
+        marker (car markerInfo)
+        anchor (cadr markerInfo)
+        ed (entget eSel)
         p1 (cdr (assoc 10 ed))
         p2 (cdr (assoc 11 ed))
         lay (cdr (assoc 8 ed)))
   (if (null lay) (setq lay "0"))
-  (if (and p1 p2)
-    (progn
-      (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
-            ang (angle p1 p2)
-            ux (cos ang)
-            uy (sin ang)
-            vx (- (sin ang))
-            vy (cos ang))
-      (setq c1 (list (+ (car mid) (* ux (- (/ gapW 2.0)))) (+ (cadr mid) (* uy (- (/ gapW 2.0)))) 0.0)
-            c2 (list (+ (car mid) (* ux (/ gapW 2.0))) (+ (cadr mid) (* uy (/ gapW 2.0))) 0.0))
-      (setq s1 (list (+ (car c1) (* vx (- (/ barH 2.0)))) (+ (cadr c1) (* vy (- (/ barH 2.0)))) 0.0)
-            e1 (list (+ (car c1) (* vx (/ barH 2.0))) (+ (cadr c1) (* vy (/ barH 2.0))) 0.0)
-            s2 (list (+ (car c2) (* vx (- (/ barH 2.0)))) (+ (cadr c2) (* vy (- (/ barH 2.0)))) 0.0)
-            e2 (list (+ (car c2) (* vx (/ barH 2.0))) (+ (cadr c2) (* vy (/ barH 2.0))) 0.0))
-      (setq b1 (entmakex (list (cons 0 "LINE") (cons 8 lay) (cons 10 s1) (cons 11 e1))))
-      (setq b2 (entmakex (list (cons 0 "LINE") (cons 8 lay) (cons 10 s2) (cons 11 e2))))
-      (list b1 b2)
-    )
-  )
-)
 
-(defun g6:applyBreakerToLine (eSel breakMap gapW barH / brkPair oldTail oldTailEd oldTailEnd oldLineEd ed p1 p2 lay lineLen gapUse mid ang g1 g2 bars tailEnt be)
-  (setq brkPair (assoc eSel breakMap))
+  ;; An existing tail preserves the logical full endpoint while the source is split.
   (if brkPair
     (progn
       (setq oldTail (nth 2 (cdr brkPair)))
-      (if (and oldTail (entget oldTail))
-        (progn
-          (setq oldTailEd (entget oldTail)
-                oldTailEnd (cdr (assoc 11 oldTailEd))
-                oldLineEd (entget eSel))
-          (if (and oldTailEnd oldLineEd (assoc 11 oldLineEd))
-            (progn
-              (setq oldLineEd (subst (cons 11 oldTailEnd) (assoc 11 oldLineEd) oldLineEd))
-              (entmod oldLineEd)
-              (entupd eSel)
-            )
-          )
-        )
+      (if (and oldTail (setq oldTailEd (entget oldTail)) (assoc 11 oldTailEd))
+        (setq p2 (cdr (assoc 11 oldTailEd)))
       )
-      (foreach be (cdr brkPair) (if (and be (entget be)) (entdel be)))
     )
   )
 
-  (setq ed (entget eSel)
-        p1 (cdr (assoc 10 ed))
-        p2 (cdr (assoc 11 ed))
-        lay (cdr (assoc 8 ed)))
-  (if (null lay) (setq lay "0"))
-
-  (if (and p1 p2)
+  (if (and p1 p2 marker anchor)
     (progn
       (setq lineLen (distance p1 p2)
             gapUse gapW)
-      (if (>= gapUse lineLen)
-        (setq gapUse (max 0.001 (* 0.5 lineLen)))
-      )
+      (if (>= gapUse lineLen) (setq gapUse (max 0.001 (* 0.5 lineLen))))
       (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
             ang (angle p1 p2)
             g1 (polar mid (+ ang pi) (/ gapUse 2.0))
-            g2 (polar mid ang (/ gapUse 2.0)))
-
-      (setq bars (g6:createBreakerBars eSel gapUse barH))
-
-      (setq ed (subst (cons 11 g1) (assoc 11 ed) ed))
-      (entmod ed)
-      (entupd eSel)
-
-      (setq tailEnt (entmakex (list (cons 0 "LINE") (cons 8 lay) (cons 10 g2) (cons 11 p2))))
-
-      (if (null bars) (setq bars (list nil nil)))
-      (setq bars (append bars (list tailEnt)))
-      (if brkPair
-        (setq breakMap (subst (cons eSel bars) brkPair breakMap))
-        (setq breakMap (cons (cons eSel bars) breakMap))
+            g2 (polar mid ang (/ gapUse 2.0))
+            markers (g6:createMarkerPairAtEnds marker anchor p1 p2 gapUse markerScale lay nil))
+      (if markers
+        (progn
+          (setq tailEnt (entmakex (list (cons 0 "LINE") (cons 8 lay) (cons 10 g2) (cons 11 p2))))
+          (if tailEnt
+            (progn
+              ;; Commit only after both marker copies and the replacement tail exist.
+              (if brkPair (foreach be (cdr brkPair) (if (and be (entget be)) (entdel be))))
+              (setq ed (entget eSel)
+                    ed (subst (cons 11 g1) (assoc 11 ed) ed))
+              (entmod ed)
+              (entupd eSel)
+              (setq markers (append markers (list tailEnt)))
+              (if brkPair
+                (setq breakMap (subst (cons eSel markers) brkPair breakMap))
+                (setq breakMap (cons (cons eSel markers) breakMap))
+              )
+              (setq *g6-break-work* nil)
+            )
+            (progn
+              (g6:deleteEnts markers)
+              (setq *g6-break-work* nil)
+              (prompt "\nUnable to create breaker tail; breaker creation canceled.")
+            )
+          )
+        )
+        (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
       )
     )
   )
@@ -1009,7 +1089,7 @@
 
 ;;; ------------------------------------------------------------
 ;;; Break map helpers
-;;; breakMap: alist (lineEnt . (bar1Ent bar2Ent tailEnt))
+;;; breakMap: alist (lineEnt . (markerCopy1 markerCopy2 tailEnt))
 ;;; ------------------------------------------------------------
 (defun g6:deleteBreaks (breakMap / pair ents)
   (while breakMap
@@ -1123,17 +1203,20 @@
                i e userLen len nextpt
                dimOff dimOk dimEnts dimMap dimEligible dimAns ed p1 p2 mid ang nAng dimPt dimEnt userV tailEnt
                layAns lay suf againAns selSS selectedSources j eSel idxSel brkPair dimE txtOvr be
-               brkAns brkSS eligibleSS entCandidate brkParams gapW barH bars
+               brkAns brkSS eligibleSS entCandidate brkParams gapW markerScale markerInfo
                shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
                shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen shortPt dist
                segStack shortLoop shortOk shortRollback shortMarkPlaced reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
                )
 
   (defun *error* (msg)
+    (g6:cleanupBreakPreview)
+    (g6:cleanupBreakWork)
     (if oldOsmode  (setvar "OSMODE"  oldOsmode))
     (if oldCmdecho (setvar "CMDECHO" oldCmdecho))
-    (if (and msg (not (wcmatch (strcase msg) "*BREAK,*CANCEL*,*EXIT*")))
-      (princ (strcat "\nError: " msg))
+    (if (and msg (wcmatch (strcase msg) "*BREAK,*CANCEL*,*EXIT*"))
+      (princ "\nG6 canceled; temporary breaker preview cleaned and no partial breaker was created.")
+      (if msg (princ (strcat "\nError: " msg)))
     )
     (princ)
   )
@@ -1429,15 +1512,22 @@
 
                     (if shortTargets
                       (progn
-                        (setq brkParams (g6:pickBreakParams (car shortTargets) (g6:breakParamsDefault)))
-                        (if brkParams
+                        (setq markerInfo (g6:pickBreakerMarker))
+                        (if markerInfo
                           (progn
-                            (setq gapW (nth 0 brkParams)
-                                  barH (nth 1 brkParams))
-                            (foreach shortEnt shortTargets
-                              (setq breakMap (g6:applyBreakerToLine shortEnt breakMap gapW barH))
+                            (setq brkParams (g6:pickBreakParams (car shortTargets) markerInfo (g6:breakParamsDefault)))
+                            (if brkParams
+                              (progn
+                                (setq gapW (nth 0 brkParams)
+                                      markerScale (nth 1 brkParams))
+                                (foreach shortEnt shortTargets
+                                  (setq breakMap (g6:applyBreakerToLine shortEnt breakMap markerInfo gapW markerScale))
+                                )
+                              )
+                              (prompt "\nBreaker size selection canceled; no breakers were created.")
                             )
                           )
+                          (prompt "\nBreaker marker selection canceled; no breakers were created.")
                         )
                       )
                     )
@@ -1468,7 +1558,7 @@
       (if entStack
         (progn
           (initget "Yes No")
-          (setq brkAns (getkword "\nAdd break markers (||) to selected lines? [Yes/No] <No>: "))
+          (setq brkAns (getkword "\nAdd picked-object break markers to selected lines? [Yes/No] <No>: "))
           (if (= brkAns "Yes")
             (progn
               (setq brkSS (ssget "_:L" '((0 . "LINE"))))
@@ -1488,18 +1578,25 @@
               (if (= (sslength eligibleSS) 0)
                 (prompt "\nNo eligible lines selected from this G6 run.")
                 (progn
-                  (setq brkParams (g6:pickBreakParams (ssname eligibleSS 0) (g6:breakParamsDefault)))
-                  (if brkParams
+                  (setq markerInfo (g6:pickBreakerMarker))
+                  (if markerInfo
                     (progn
-                      (setq gapW (nth 0 brkParams)
-                            barH (nth 1 brkParams)
-                            j 0)
-                      (while (< j (sslength eligibleSS))
-                        (setq eSel (ssname eligibleSS j))
-                        (setq breakMap (g6:applyBreakerToLine eSel breakMap gapW barH))
-                        (setq j (1+ j))
+                      (setq brkParams (g6:pickBreakParams (ssname eligibleSS 0) markerInfo (g6:breakParamsDefault)))
+                      (if brkParams
+                        (progn
+                          (setq gapW (nth 0 brkParams)
+                                markerScale (nth 1 brkParams)
+                                j 0)
+                          (while (< j (sslength eligibleSS))
+                            (setq eSel (ssname eligibleSS j))
+                            (setq breakMap (g6:applyBreakerToLine eSel breakMap markerInfo gapW markerScale))
+                            (setq j (1+ j))
+                          )
+                        )
+                        (prompt "\nBreaker size selection canceled; no breakers were created.")
                       )
                     )
+                    (prompt "\nBreaker marker selection canceled; no breakers were created.")
                   )
                 )
               )
@@ -1615,17 +1712,16 @@
                   (setq againAns "No")
                   (progn
                     (setq suf (g6:promptSuffix lay))
-                    (prompt (strcat "\nSelect source G6 segments to move to layer \"" lay "\". Breaker helper lines are ignored."))
-                    (setq selSS (ssget '((0 . "LINE"))))
+                    (prompt (strcat "\nSelect source G6 segments or breaker tails to move to layer \"" lay "\". Marker copies are ignored."))
+                    (setq selSS (ssget))
                     (if selSS
                       (progn
-                        ;; Accept each actual current-run source line once; ignore break bars and tails.
+                        ;; Resolve source lines and tails; marker copies intentionally resolve to nil.
                         (setq selectedSources '()
                               j 0)
                         (while (< j (sslength selSS))
-                          (setq eSel (ssname selSS j)
-                                idxSel (g6:index-of eSel entList))
-                          (if (and (not (null idxSel)) (not (member eSel selectedSources)))
+                          (setq eSel (g6:resolveSourceLine (ssname selSS j) entList breakMap))
+                          (if (and eSel (not (member eSel selectedSources)))
                             (setq selectedSources (cons eSel selectedSources))
                           )
                           (setq j (1+ j))
@@ -1653,7 +1749,7 @@
                               )
                             )
                           )
-                          (prompt "\nNo source G6 segments selected; breaker helper lines were ignored.")
+                          (prompt "\nNo source G6 segments or breaker tails selected; marker copies were ignored.")
                         )
                       )
                       (prompt "\nNo selection made.")

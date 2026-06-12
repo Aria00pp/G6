@@ -329,27 +329,37 @@
   )
 )
 
-(defun g6:copyMarkerAt (marker anchor target ang markerScale lay preview / before copied)
-  (setq before (entlast))
-  (command "_.COPY" marker "" anchor target "")
-  (setq copied (entlast))
-  (if (or (null copied) (eq copied before) (null (entget copied)))
-    nil
+(defun g6:copyMarkerAt (marker anchor target ang markerScale lay preview / obj copiedObj copied result)
+  (vl-load-com)
+  (if (and marker (entget marker) anchor target (> markerScale 0.0))
     (progn
-      ;; Track an in-progress copy so the command error handler can remove it.
-      (setq *g6-break-work* (cons copied *g6-break-work*))
-      (command "_.ROTATE" copied "" target (g6:rad->deg ang))
-      (if (and copied (entget copied))
-        (command "_.SCALE" copied "" target markerScale)
-      )
-      (if (and copied (entget copied))
-        (progn
-          (if (not preview)
-            (g6:setLayerEnt copied lay)
-          )
-          copied
-        )
+      (setq obj (vlax-ename->vla-object marker)
+            copiedObj (vl-catch-all-apply 'vla-Copy (list obj)))
+      (if (vl-catch-all-error-p copiedObj)
         nil
+        (progn
+          (setq copied (vlax-vla-object->ename copiedObj))
+          ;; Track an in-progress copy so the command error handler can remove it.
+          (if copied (setq *g6-break-work* (cons copied *g6-break-work*)))
+          (setq result
+            (vl-catch-all-apply
+              '(lambda ()
+                 (vla-Move copiedObj (vlax-3d-point anchor) (vlax-3d-point target))
+                 (vla-Rotate copiedObj (vlax-3d-point target) ang)
+                 (vla-ScaleEntity copiedObj (vlax-3d-point target) markerScale))))
+          (if (or (vl-catch-all-error-p result) (null copied) (null (entget copied)))
+            (progn
+              (g6:deleteEnts (list copied))
+              nil
+            )
+            (progn
+              (if (not preview)
+                (g6:setLayerEnt copied lay)
+              )
+              copied
+            )
+          )
+        )
       )
     )
   )

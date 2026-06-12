@@ -416,7 +416,7 @@
   )
 )
 
-(defun g6:pickBreakOneValue (sampleEnt marker anchor gapW markerScale mode / ed p1 p2 mid ang done val label action typed pickPt vec dotv curGap curScale)
+(defun g6:pickBreakOneValue (sampleEnt marker anchor gapW markerScale mode / ed p1 p2 mid done val label input curGap curScale)
   (setq ed (entget sampleEnt)
         p1 (if ed (cdr (assoc 10 ed)) nil)
         p2 (if ed (cdr (assoc 11 ed)) nil)
@@ -424,8 +424,7 @@
         label (if (= mode "GAP") "Breaker width/spacing" "Breaker marker scale")
         done nil)
   (if (and p1 p2)
-    (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
-          ang (angle p1 p2))
+    (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2))
     (progn
       (prompt "\nUnable to preview breaker size; breaker creation canceled.")
       (setq val nil done T)
@@ -444,37 +443,15 @@
     )
   )
   (while (not done)
-    (initget "Pick Type Preview OK Cancel")
-    (setq action
-      (getkword
-        (strcat "\n" label " = " (g6:fmtLen val) ". [Pick/Type/Preview/OK/Cancel] <OK>: ")))
-    (cond
-      ((or (null action) (= action "OK"))
-        (setq done T)
-      )
-      ((= action "Cancel")
-        (setq val nil done T)
-      )
-      ((= action "Type")
-        (setq typed (getreal (strcat "\nEnter " (strcase label T) " <" (g6:fmtLen val) ">: ")))
-        (if typed
-          (progn
-            (setq val (max 0.001 typed))
-            (prompt (strcat "\n" label " set to: " (g6:fmtLen val)))
-            (if (= mode "GAP")
-              (setq curGap val curScale markerScale)
-              (setq curGap gapW curScale val)
-            )
-            (if (null (g6:updateBreakPreview sampleEnt marker anchor curGap curScale))
-              (progn
-                (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
-                (setq val nil done T)
-              )
-            )
-          )
-        )
-      )
-      ((= action "Preview")
+    ;; Standard getdist input keeps typed values visible and lets the user
+    ;; repeatedly type a distance or pick a point. Enter accepts the current
+    ;; value; Esc is handled by the command error cleanup.
+    (initget 6)
+    (setq input (getdist mid (strcat "\n" label " <" (g6:fmtLen val) ">: ")))
+    (if input
+      (progn
+        (setq val (max 0.001 input))
+        (prompt (strcat "\n" label " set to: " (g6:fmtLen val)))
         (if (= mode "GAP")
           (setq curGap val curScale markerScale)
           (setq curGap gapW curScale val)
@@ -486,30 +463,7 @@
           )
         )
       )
-      ((= action "Pick")
-        (setq pickPt (getpoint (strcat "\nPick point to sample " (strcase label T) ": ")))
-        (if pickPt
-          (progn
-            (setq vec (g6:pt- pickPt mid))
-            (if (= mode "GAP")
-              (setq dotv (+ (* (car vec) (cos ang)) (* (cadr vec) (sin ang))))
-              (setq dotv (+ (* (car vec) (- (sin ang))) (* (cadr vec) (cos ang))))
-            )
-            (setq val (max 0.001 (* 2.0 (abs dotv))))
-            (prompt (strcat "\n" label " set to: " (g6:fmtLen val)))
-            (if (= mode "GAP")
-              (setq curGap val curScale markerScale)
-              (setq curGap gapW curScale val)
-            )
-            (if (null (g6:updateBreakPreview sampleEnt marker anchor curGap curScale))
-              (progn
-                (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
-                (setq val nil done T)
-              )
-            )
-          )
-        )
-      )
+      (setq done T)
     )
   )
   (g6:cleanupBreakPreview)
@@ -521,7 +475,6 @@
         anchor (cadr markerInfo)
         gapW (nth 0 params)
         markerScale (nth 1 params))
-  (prompt "\nG6 breaker sizing UX v2 loaded")
   (setq v (g6:pickBreakOneValue sampleEnt marker anchor gapW markerScale "GAP"))
   (if v
     (progn

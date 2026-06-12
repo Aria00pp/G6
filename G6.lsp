@@ -210,81 +210,31 @@
   (while (= 1 (logand 1 (getvar "CMDACTIVE"))) (command))
 )
 
-(defun g6:pickDimOffsetPreview (eligible breakMap / done gr typ dat typed ref refMid refPerp vec off cand oldSegs)
-  ;; Finish any ordinary command before grread consumes dimension-offset input.
-  (g6:finishActiveCommand)
-  (setq done nil off nil typed "" oldSegs '())
+(defun g6:pickDimOffsetPreview (eligible breakMap currentOff / ref refMid prompt input)
+  (vl-load-com)
   (setq ref (g6:firstDimRef eligible breakMap)
-        refMid (if ref (car ref) nil)
-        refPerp (if ref (cadr ref) nil))
-  (prompt "\nDimension offset (move mouse / type / click, ESC = none): ")
-  (while (not done)
-    ;; Include the all-keys bit so unsupported keys are consumed here, not by AutoCAD.
-    (setq gr (grread T 15 0)
-          typ (car gr)
-          dat (cadr gr))
-    (cond
-      ((= typ 5)
-        (if (and refMid refPerp (= (strlen typed) 0) dat (listp dat))
-          (progn
-            (setq vec (g6:pt- dat refMid)
-                  off (abs (+ (* (car vec) (car refPerp)) (* (cadr vec) (cadr refPerp)))))
-            (g6:drawPreviewSegs oldSegs 0)
-            (setq oldSegs (g6:buildDimPreviewSegs eligible breakMap off))
-            (g6:drawPreviewSegs oldSegs 1)
-          )
-        )
-      )
-      ((= typ 3)
-        (if (> (strlen typed) 0)
-          (setq off (abs (atof typed)))
-          (if (and refMid refPerp dat (listp dat))
-            (progn
-              (setq vec (g6:pt- dat refMid)
-                    off (abs (+ (* (car vec) (car refPerp)) (* (cadr vec) (cadr refPerp)))))
-            )
-          )
-        )
-        (setq done T)
-      )
-      ((= typ 2)
-        (cond
-          ((= dat 27)
-            (setq off nil done T)
-          )
-          ((= dat 13)
-            (if (> (strlen typed) 0)
-              (setq off (abs (atof typed)))
-            )
-            (setq done T)
-          )
-          ((= dat 8)
-            (if (> (strlen typed) 0)
-              (setq typed (substr typed 1 (1- (strlen typed))))
-            )
-            (if (> (strlen typed) 0)
-              (setq off (abs (atof typed)))
-              (setq off nil)
-            )
-            (g6:drawPreviewSegs oldSegs 0)
-            (setq oldSegs (g6:buildDimPreviewSegs eligible breakMap off))
-            (g6:drawPreviewSegs oldSegs 1)
-          )
-          ((or (and (>= dat 48) (<= dat 57)) (= dat 46))
-            (setq typed (strcat typed (chr dat))
-                  off (abs (atof typed)))
-            (g6:drawPreviewSegs oldSegs 0)
-            (setq oldSegs (g6:buildDimPreviewSegs eligible breakMap off))
-            (g6:drawPreviewSegs oldSegs 1)
-          )
-        )
-      )
-    )
-  )
-  (g6:drawPreviewSegs oldSegs 0)
-  (if (and off (> off 0.0))
-    (max off 1e-6)
-    nil
+        refMid (if ref (car ref) nil))
+  (setq prompt
+    (strcat "\nDimension offset <"
+      (if (and currentOff (> currentOff 0.0)) (g6:fmtLen currentOff) "none")
+      ">: "))
+  ;; Use standard AutoCAD distance input so typed values remain visible and
+  ;; keystrokes are consumed by getdist instead of leaking back as commands.
+  ;; Enter accepts the current offset when one exists, or skips dimensions when
+  ;; there is no current/default offset. Esc is caught and treated as a clean
+  ;; skip for this dimension-offset request.
+  (initget 6)
+  (setq input
+    (vl-catch-all-apply
+      '(lambda ()
+         (if refMid
+           (getdist refMid prompt)
+           (getdist prompt)))))
+  (cond
+    ((vl-catch-all-error-p input) nil)
+    ((and input (> input 0.0)) (max input 1e-6))
+    ((and currentOff (> currentOff 0.0)) currentOff)
+    (T nil)
   )
 )
 
@@ -1706,7 +1656,7 @@
           )
           (setq dimEligible (reverse dimEligible))
           (if dimEligible
-            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
+            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap nil))
             (progn
               (prompt "\nNo segments eligible for dimensions (>25).")
               (setq dimOff nil)
@@ -1767,7 +1717,7 @@
                 (if (or (null dimAns) (= dimAns "Yes"))
                   (setq dimOk T)
                   (progn
-                    (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
+                    (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap dimOff))
                     (if (null dimOff)
                       (progn
                         (g6:deleteEntList dimEnts)
@@ -1858,7 +1808,7 @@
         (if (null dimMap)
           (prompt "\nNo dimensions from this run to reposition.")
           (progn
-            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
+            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap dimOff))
             (if dimOff
               (progn
                 (setq reDimLayMap '())

@@ -210,81 +210,31 @@
   (while (= 1 (logand 1 (getvar "CMDACTIVE"))) (command))
 )
 
-(defun g6:pickDimOffsetPreview (eligible breakMap / done gr typ dat typed ref refMid refPerp vec off cand oldSegs)
-  ;; Finish any ordinary command before grread consumes dimension-offset input.
-  (g6:finishActiveCommand)
-  (setq done nil off nil typed "" oldSegs '())
+(defun g6:pickDimOffsetPreview (eligible breakMap currentOff / ref refMid prompt input)
+  (vl-load-com)
   (setq ref (g6:firstDimRef eligible breakMap)
-        refMid (if ref (car ref) nil)
-        refPerp (if ref (cadr ref) nil))
-  (prompt "\nDimension offset (move mouse / type / click, ESC = none): ")
-  (while (not done)
-    ;; Include the all-keys bit so unsupported keys are consumed here, not by AutoCAD.
-    (setq gr (grread T 15 0)
-          typ (car gr)
-          dat (cadr gr))
-    (cond
-      ((= typ 5)
-        (if (and refMid refPerp (= (strlen typed) 0) dat (listp dat))
-          (progn
-            (setq vec (g6:pt- dat refMid)
-                  off (abs (+ (* (car vec) (car refPerp)) (* (cadr vec) (cadr refPerp)))))
-            (g6:drawPreviewSegs oldSegs 0)
-            (setq oldSegs (g6:buildDimPreviewSegs eligible breakMap off))
-            (g6:drawPreviewSegs oldSegs 1)
-          )
-        )
-      )
-      ((= typ 3)
-        (if (> (strlen typed) 0)
-          (setq off (abs (atof typed)))
-          (if (and refMid refPerp dat (listp dat))
-            (progn
-              (setq vec (g6:pt- dat refMid)
-                    off (abs (+ (* (car vec) (car refPerp)) (* (cadr vec) (cadr refPerp)))))
-            )
-          )
-        )
-        (setq done T)
-      )
-      ((= typ 2)
-        (cond
-          ((= dat 27)
-            (setq off nil done T)
-          )
-          ((= dat 13)
-            (if (> (strlen typed) 0)
-              (setq off (abs (atof typed)))
-            )
-            (setq done T)
-          )
-          ((= dat 8)
-            (if (> (strlen typed) 0)
-              (setq typed (substr typed 1 (1- (strlen typed))))
-            )
-            (if (> (strlen typed) 0)
-              (setq off (abs (atof typed)))
-              (setq off nil)
-            )
-            (g6:drawPreviewSegs oldSegs 0)
-            (setq oldSegs (g6:buildDimPreviewSegs eligible breakMap off))
-            (g6:drawPreviewSegs oldSegs 1)
-          )
-          ((or (and (>= dat 48) (<= dat 57)) (= dat 46))
-            (setq typed (strcat typed (chr dat))
-                  off (abs (atof typed)))
-            (g6:drawPreviewSegs oldSegs 0)
-            (setq oldSegs (g6:buildDimPreviewSegs eligible breakMap off))
-            (g6:drawPreviewSegs oldSegs 1)
-          )
-        )
-      )
-    )
-  )
-  (g6:drawPreviewSegs oldSegs 0)
-  (if (and off (> off 0.0))
-    (max off 1e-6)
-    nil
+        refMid (if ref (car ref) nil))
+  (setq prompt
+    (strcat "\nDimension offset <"
+      (if (and currentOff (> currentOff 0.0)) (g6:fmtLen currentOff) "none")
+      ">: "))
+  ;; Use standard AutoCAD distance input so typed values remain visible and
+  ;; keystrokes are consumed by getdist instead of leaking back as commands.
+  ;; Enter accepts the current offset when one exists, or skips dimensions when
+  ;; there is no current/default offset. Esc is caught and treated as a clean
+  ;; skip for this dimension-offset request.
+  (initget 6)
+  (setq input
+    (vl-catch-all-apply
+      '(lambda ()
+         (if refMid
+           (getdist refMid prompt)
+           (getdist prompt)))))
+  (cond
+    ((vl-catch-all-error-p input) nil)
+    ((and input (> input 0.0)) (max input 1e-6))
+    ((and currentOff (> currentOff 0.0)) currentOff)
+    (T nil)
   )
 )
 
@@ -329,27 +279,37 @@
   )
 )
 
-(defun g6:copyMarkerAt (marker anchor target ang markerScale lay preview / before copied)
-  (setq before (entlast))
-  (command "_.COPY" marker "" anchor target "")
-  (setq copied (entlast))
-  (if (or (null copied) (eq copied before) (null (entget copied)))
-    nil
+(defun g6:copyMarkerAt (marker anchor target ang markerScale lay preview / obj copiedObj copied result)
+  (vl-load-com)
+  (if (and marker (entget marker) anchor target (> markerScale 0.0))
     (progn
-      ;; Track an in-progress copy so the command error handler can remove it.
-      (setq *g6-break-work* (cons copied *g6-break-work*))
-      (command "_.ROTATE" copied "" target (g6:rad->deg ang))
-      (if (and copied (entget copied))
-        (command "_.SCALE" copied "" target markerScale)
-      )
-      (if (and copied (entget copied))
-        (progn
-          (if (not preview)
-            (g6:setLayerEnt copied lay)
-          )
-          copied
-        )
+      (setq obj (vlax-ename->vla-object marker)
+            copiedObj (vl-catch-all-apply 'vla-Copy (list obj)))
+      (if (vl-catch-all-error-p copiedObj)
         nil
+        (progn
+          (setq copied (vlax-vla-object->ename copiedObj))
+          ;; Track an in-progress copy so the command error handler can remove it.
+          (if copied (setq *g6-break-work* (cons copied *g6-break-work*)))
+          (setq result
+            (vl-catch-all-apply
+              '(lambda ()
+                 (vla-Move copiedObj (vlax-3d-point anchor) (vlax-3d-point target))
+                 (vla-Rotate copiedObj (vlax-3d-point target) ang)
+                 (vla-ScaleEntity copiedObj (vlax-3d-point target) markerScale))))
+          (if (or (vl-catch-all-error-p result) (null copied) (null (entget copied)))
+            (progn
+              (g6:deleteEnts (list copied))
+              nil
+            )
+            (progn
+              (if (not preview)
+                (g6:setLayerEnt copied lay)
+              )
+              copied
+            )
+          )
+        )
       )
     )
   )
@@ -416,7 +376,7 @@
   )
 )
 
-(defun g6:pickBreakOneValue (sampleEnt marker anchor gapW markerScale mode / ed p1 p2 mid ang done val label action typed pickPt vec dotv curGap curScale)
+(defun g6:pickBreakOneValue (sampleEnt marker anchor gapW markerScale mode / ed p1 p2 mid done val label input curGap curScale)
   (setq ed (entget sampleEnt)
         p1 (if ed (cdr (assoc 10 ed)) nil)
         p2 (if ed (cdr (assoc 11 ed)) nil)
@@ -424,8 +384,7 @@
         label (if (= mode "GAP") "Breaker width/spacing" "Breaker marker scale")
         done nil)
   (if (and p1 p2)
-    (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
-          ang (angle p1 p2))
+    (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2))
     (progn
       (prompt "\nUnable to preview breaker size; breaker creation canceled.")
       (setq val nil done T)
@@ -444,37 +403,15 @@
     )
   )
   (while (not done)
-    (initget "Pick Type Preview OK Cancel")
-    (setq action
-      (getkword
-        (strcat "\n" label " = " (g6:fmtLen val) ". [Pick/Type/Preview/OK/Cancel] <OK>: ")))
-    (cond
-      ((or (null action) (= action "OK"))
-        (setq done T)
-      )
-      ((= action "Cancel")
-        (setq val nil done T)
-      )
-      ((= action "Type")
-        (setq typed (getreal (strcat "\nEnter " (strcase label T) " <" (g6:fmtLen val) ">: ")))
-        (if typed
-          (progn
-            (setq val (max 0.001 typed))
-            (prompt (strcat "\n" label " set to: " (g6:fmtLen val)))
-            (if (= mode "GAP")
-              (setq curGap val curScale markerScale)
-              (setq curGap gapW curScale val)
-            )
-            (if (null (g6:updateBreakPreview sampleEnt marker anchor curGap curScale))
-              (progn
-                (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
-                (setq val nil done T)
-              )
-            )
-          )
-        )
-      )
-      ((= action "Preview")
+    ;; Standard getdist input keeps typed values visible and lets the user
+    ;; repeatedly type a distance or pick a point. Enter accepts the current
+    ;; value; Esc is handled by the command error cleanup.
+    (initget 6)
+    (setq input (getdist mid (strcat "\n" label " <" (g6:fmtLen val) ">: ")))
+    (if input
+      (progn
+        (setq val (max 0.001 input))
+        (prompt (strcat "\n" label " set to: " (g6:fmtLen val)))
         (if (= mode "GAP")
           (setq curGap val curScale markerScale)
           (setq curGap gapW curScale val)
@@ -486,30 +423,7 @@
           )
         )
       )
-      ((= action "Pick")
-        (setq pickPt (getpoint (strcat "\nPick point to sample " (strcase label T) ": ")))
-        (if pickPt
-          (progn
-            (setq vec (g6:pt- pickPt mid))
-            (if (= mode "GAP")
-              (setq dotv (+ (* (car vec) (cos ang)) (* (cadr vec) (sin ang))))
-              (setq dotv (+ (* (car vec) (- (sin ang))) (* (cadr vec) (cos ang))))
-            )
-            (setq val (max 0.001 (* 2.0 (abs dotv))))
-            (prompt (strcat "\n" label " set to: " (g6:fmtLen val)))
-            (if (= mode "GAP")
-              (setq curGap val curScale markerScale)
-              (setq curGap gapW curScale val)
-            )
-            (if (null (g6:updateBreakPreview sampleEnt marker anchor curGap curScale))
-              (progn
-                (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
-                (setq val nil done T)
-              )
-            )
-          )
-        )
-      )
+      (setq done T)
     )
   )
   (g6:cleanupBreakPreview)
@@ -521,7 +435,6 @@
         anchor (cadr markerInfo)
         gapW (nth 0 params)
         markerScale (nth 1 params))
-  (prompt "\nG6 breaker sizing UX v2 loaded")
   (setq v (g6:pickBreakOneValue sampleEnt marker anchor gapW markerScale "GAP"))
   (if v
     (progn
@@ -1152,6 +1065,71 @@
   )
 )
 
+
+(defun g6:breakMapEnts (breakMap / pair ents out)
+  (setq out '())
+  (while breakMap
+    (setq pair (car breakMap)
+          ents (cdr pair))
+    (foreach e ents
+      (if (and e (not (member e out)))
+        (setq out (cons e out))
+      )
+    )
+    (setq breakMap (cdr breakMap))
+  )
+  out
+)
+
+(defun g6:snapshotEnts (ents / e ed out)
+  (setq out '())
+  (foreach e ents
+    (if (and e (setq ed (entget e)))
+      (setq out (cons (cons e ed) out))
+    )
+  )
+  out
+)
+
+(defun g6:restoreEntSnapshot (snap / pair e ed)
+  (foreach pair snap
+    (setq e (car pair)
+          ed (cdr pair))
+    ;; entdel toggles erased entities back on in the current drawing session;
+    ;; call it only when the snapshotted entity is currently erased.
+    (if (and e (null (entget e))) (entdel e))
+    (if (and e (entget e))
+      (progn
+        (entmod ed)
+        (entupd e)
+      )
+    )
+  )
+)
+
+(defun g6:deleteBreakMapEnts (breakMap keepEnts / pair ents e)
+  (while breakMap
+    (setq pair (car breakMap)
+          ents (cdr pair))
+    (foreach e ents
+      (if (and e (not (member e keepEnts)) (entget e))
+        (entdel e)
+      )
+    )
+    (setq breakMap (cdr breakMap))
+  )
+)
+
+(defun g6:cloneBreakMap (breakMap / out pair)
+  (setq out '())
+  (while breakMap
+    (setq pair (car breakMap)
+          out (cons (cons (car pair) (mapcar '(lambda (e) e) (cdr pair))) out)
+          breakMap (cdr breakMap))
+  )
+  (reverse out)
+)
+
 ;;; ------------------------------------------------------------
 ;;; Internal recompute helper (currently not used by c:G6)
 ;;; ------------------------------------------------------------
@@ -1258,7 +1236,7 @@
                brkAns brkSS eligibleSS entCandidate brkParams gapW markerScale markerInfo
                shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
                shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen shortPt dist
-               segStack shortLoop shortOk shortRollback shortMarkPlaced reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
+               segStack shortLoop shortOk shortLineSnap shortBreakMapSnap shortBreakEntSnap shortBreakKeep reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
                )
 
   (defun *error* (msg)
@@ -1452,8 +1430,7 @@
       ;; shorten selected long lines from this run, propagate downstream, then auto-break shortened lines
       (if entStack
         (progn
-          (setq shortLoop T
-                shortMarkPlaced nil)
+          (setq shortLoop T)
           (while shortLoop
             (setq shortLoop nil
                   shortTargets '()
@@ -1462,8 +1439,10 @@
             (setq shortAns (getkword "\nShorten long lines? [Yes/No] <No>: "))
             (if (= shortAns "Yes")
               (progn
-                (command "_.UNDO" "_Mark")
-                (setq shortMarkPlaced T)
+                (setq shortLineSnap (g6:snapshotEnts entList)
+                      shortBreakMapSnap (g6:cloneBreakMap breakMap)
+                      shortBreakKeep (g6:breakMapEnts shortBreakMapSnap)
+                      shortBreakEntSnap (g6:snapshotEnts shortBreakKeep))
 
                 (setq shortThreshold (getreal "\nThreshold <150>: "))
                 (if (or (null shortThreshold) (<= shortThreshold 0.0)) (setq shortThreshold 150.0))
@@ -1595,15 +1574,15 @@
                 (setq shortOk (getkword "\nShorten + breakers OK? [Yes/No] <Yes>: "))
                 (if (= shortOk "No")
                   (progn
-                    (command "_.UNDO" "_Back")
-                    (setq breakMap '()
-                          dimMap '()
+                    (g6:deleteBreakMapEnts breakMap shortBreakKeep)
+                    (g6:restoreEntSnapshot shortLineSnap)
+                    (g6:restoreEntSnapshot shortBreakEntSnap)
+                    (setq breakMap (g6:cloneBreakMap shortBreakMapSnap)
                           shortTargets '()
                           segStack (g6:buildSegStack entList userList)
-                          shortLoop T
-                          shortMarkPlaced nil)
+                          shortLoop T)
+                    (command "_.REGEN")
                   )
-                  (setq shortMarkPlaced nil)
                 )
               )
             )
@@ -1677,7 +1656,7 @@
           )
           (setq dimEligible (reverse dimEligible))
           (if dimEligible
-            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
+            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap nil))
             (progn
               (prompt "\nNo segments eligible for dimensions (>25).")
               (setq dimOff nil)
@@ -1738,7 +1717,7 @@
                 (if (or (null dimAns) (= dimAns "Yes"))
                   (setq dimOk T)
                   (progn
-                    (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
+                    (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap dimOff))
                     (if (null dimOff)
                       (progn
                         (g6:deleteEntList dimEnts)
@@ -1829,7 +1808,7 @@
         (if (null dimMap)
           (prompt "\nNo dimensions from this run to reposition.")
           (progn
-            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap))
+            (setq dimOff (g6:pickDimOffsetPreview dimEligible breakMap dimOff))
             (if dimOff
               (progn
                 (setq reDimLayMap '())

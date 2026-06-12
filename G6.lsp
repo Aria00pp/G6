@@ -472,16 +472,12 @@
     )
   )
   (while (not done)
-    ;; Use all-key input without cursor tracking. Type-5 mouse movement must not
-    ;; drive preview redraws; clicks and typed values are the only live updates.
-    (setq gr (grread T 14 0)
+    ;; Do not request cursor tracking here: mouse movement alone must not
+    ;; generate type-5 events. Only clicks and keyboard input update preview.
+    (setq gr (grread nil 14 0)
           typ (car gr)
           dat (cadr gr))
     (cond
-      ((= typ 5)
-        ;; Ignore mouse movement completely to avoid repeated preview work and
-        ;; Windows working/loading cursor lag during breaker sizing.
-      )
       ((= typ 3)
         (if (and dat (listp dat))
           (progn

@@ -1105,6 +1105,71 @@
   )
 )
 
+
+(defun g6:breakMapEnts (breakMap / pair ents out)
+  (setq out '())
+  (while breakMap
+    (setq pair (car breakMap)
+          ents (cdr pair))
+    (foreach e ents
+      (if (and e (not (member e out)))
+        (setq out (cons e out))
+      )
+    )
+    (setq breakMap (cdr breakMap))
+  )
+  out
+)
+
+(defun g6:snapshotEnts (ents / e ed out)
+  (setq out '())
+  (foreach e ents
+    (if (and e (setq ed (entget e)))
+      (setq out (cons (cons e ed) out))
+    )
+  )
+  out
+)
+
+(defun g6:restoreEntSnapshot (snap / pair e ed)
+  (foreach pair snap
+    (setq e (car pair)
+          ed (cdr pair))
+    ;; entdel toggles erased entities back on in the current drawing session;
+    ;; call it only when the snapshotted entity is currently erased.
+    (if (and e (null (entget e))) (entdel e))
+    (if (and e (entget e))
+      (progn
+        (entmod ed)
+        (entupd e)
+      )
+    )
+  )
+)
+
+(defun g6:deleteBreakMapEnts (breakMap keepEnts / pair ents e)
+  (while breakMap
+    (setq pair (car breakMap)
+          ents (cdr pair))
+    (foreach e ents
+      (if (and e (not (member e keepEnts)) (entget e))
+        (entdel e)
+      )
+    )
+    (setq breakMap (cdr breakMap))
+  )
+)
+
+(defun g6:cloneBreakMap (breakMap / out pair)
+  (setq out '())
+  (while breakMap
+    (setq pair (car breakMap)
+          out (cons (cons (car pair) (mapcar '(lambda (e) e) (cdr pair))) out)
+          breakMap (cdr breakMap))
+  )
+  (reverse out)
+)
+
 ;;; ------------------------------------------------------------
 ;;; Internal recompute helper (currently not used by c:G6)
 ;;; ------------------------------------------------------------
@@ -1211,7 +1276,7 @@
                brkAns brkSS eligibleSS entCandidate brkParams gapW markerScale markerInfo
                shortAns shortSS shortEligible shortOrder shortThreshold shortCap shortTargets shortRecs shortEndpoints
                shortEnt shortIdx anchor oldEnd targetLen newEnd delta tol shortMoved moveEnt moveEd moveP1 moveP2 userCapLen requiredCapLen capUsedLen shortPt dist
-               segStack shortLoop shortOk shortRollback shortMarkPlaced reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
+               segStack shortLoop shortOk shortLineSnap shortBreakMapSnap shortBreakEntSnap shortBreakKeep reDimAns reDimLayMap reDimPair oldDimEnt oldDimLay
                )
 
   (defun *error* (msg)
@@ -1405,8 +1470,7 @@
       ;; shorten selected long lines from this run, propagate downstream, then auto-break shortened lines
       (if entStack
         (progn
-          (setq shortLoop T
-                shortMarkPlaced nil)
+          (setq shortLoop T)
           (while shortLoop
             (setq shortLoop nil
                   shortTargets '()
@@ -1415,8 +1479,10 @@
             (setq shortAns (getkword "\nShorten long lines? [Yes/No] <No>: "))
             (if (= shortAns "Yes")
               (progn
-                (command "_.UNDO" "_Mark")
-                (setq shortMarkPlaced T)
+                (setq shortLineSnap (g6:snapshotEnts entList)
+                      shortBreakMapSnap (g6:cloneBreakMap breakMap)
+                      shortBreakKeep (g6:breakMapEnts shortBreakMapSnap)
+                      shortBreakEntSnap (g6:snapshotEnts shortBreakKeep))
 
                 (setq shortThreshold (getreal "\nThreshold <150>: "))
                 (if (or (null shortThreshold) (<= shortThreshold 0.0)) (setq shortThreshold 150.0))
@@ -1548,15 +1614,15 @@
                 (setq shortOk (getkword "\nShorten + breakers OK? [Yes/No] <Yes>: "))
                 (if (= shortOk "No")
                   (progn
-                    (command "_.UNDO" "_Back")
-                    (setq breakMap '()
-                          dimMap '()
+                    (g6:deleteBreakMapEnts breakMap shortBreakKeep)
+                    (g6:restoreEntSnapshot shortLineSnap)
+                    (g6:restoreEntSnapshot shortBreakEntSnap)
+                    (setq breakMap (g6:cloneBreakMap shortBreakMapSnap)
                           shortTargets '()
                           segStack (g6:buildSegStack entList userList)
-                          shortLoop T
-                          shortMarkPlaced nil)
+                          shortLoop T)
+                    (command "_.REGEN")
                   )
-                  (setq shortMarkPlaced nil)
                 )
               )
             )

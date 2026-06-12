@@ -344,8 +344,7 @@
       )
       (if (and copied (entget copied))
         (progn
-          (if preview
-            (g6:setEntColor copied 1)
+          (if (not preview)
             (g6:setLayerEnt copied lay)
           )
           copied
@@ -445,10 +444,10 @@
     )
   )
   (while (not done)
-    (initget "Pick Type OK Cancel")
+    (initget "Pick Type Preview OK Cancel")
     (setq action
       (getkword
-        (strcat "\n" label " = " (g6:fmtLen val) ". [Pick/Type/OK/Cancel] <OK>: ")))
+        (strcat "\n" label " = " (g6:fmtLen val) ". [Pick/Type/Preview/OK/Cancel] <OK>: ")))
     (cond
       ((or (null action) (= action "OK"))
         (setq done T)
@@ -472,6 +471,18 @@
                 (setq val nil done T)
               )
             )
+          )
+        )
+      )
+      ((= action "Preview")
+        (if (= mode "GAP")
+          (setq curGap val curScale markerScale)
+          (setq curGap gapW curScale val)
+        )
+        (if (null (g6:updateBreakPreview sampleEnt marker anchor curGap curScale))
+          (progn
+            (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
+            (setq val nil done T)
           )
         )
       )
@@ -505,39 +516,31 @@
   val
 )
 
-(defun g6:pickBreakParams (sampleEnt markerInfo params / marker anchor gapW markerScale v ans ok)
+(defun g6:pickBreakParams (sampleEnt markerInfo params / marker anchor gapW markerScale v)
   (setq marker (car markerInfo)
         anchor (cadr markerInfo)
         gapW (nth 0 params)
-        markerScale (nth 1 params)
-        ok nil)
-  (while (not ok)
-    (setq v (g6:pickBreakOneValue sampleEnt marker anchor gapW markerScale "GAP"))
-    (if (null v) (setq ok 'CANCEL) (setq gapW v))
-    (if (not (eq ok 'CANCEL))
-      (progn
-        (setq v (g6:pickBreakOneValue sampleEnt marker anchor gapW markerScale "SCALE"))
-        (if (null v) (setq ok 'CANCEL) (setq markerScale v))
-      )
-    )
-    (if (eq ok 'CANCEL)
-      (setq ok T params nil)
-      (progn
-        (initget "Yes No")
-        (setq ans (getkword "\nBreaker size OK? [Yes/No] <Yes>: "))
-        (if (or (null ans) (= ans "Yes"))
-          (setq ok T params (list gapW markerScale))
+        markerScale (nth 1 params))
+  (prompt "\nG6 breaker sizing UX v2 loaded")
+  (setq v (g6:pickBreakOneValue sampleEnt marker anchor gapW markerScale "GAP"))
+  (if v
+    (progn
+      (setq gapW v)
+      ;; Scale stage keeps the accepted width/spacing fixed.
+      (setq v (g6:pickBreakOneValue sampleEnt marker anchor gapW markerScale "SCALE"))
+      (if v
+        (progn
+          (setq markerScale v
+                params (list gapW markerScale))
+          (g6:setEnvReal "G6_BRK_GAPW" gapW)
+          (g6:setEnvReal "G6_BRK_SCALE" markerScale)
         )
+        (setq params nil)
       )
     )
+    (setq params nil)
   )
   (g6:cleanupBreakPreview)
-  (if params
-    (progn
-      (g6:setEnvReal "G6_BRK_GAPW" (nth 0 params))
-      (g6:setEnvReal "G6_BRK_SCALE" (nth 1 params))
-    )
-  )
   params
 )
 

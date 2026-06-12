@@ -203,9 +203,16 @@
   )
 )
 
+(defun g6:finishActiveCommand ()
+  ;; Finish any ordinary command before a grread loop starts. If command-line
+  ;; input remains active, keystrokes that this LISP command does not handle can
+  ;; leak back to AutoCAD and be interpreted as commands.
+  (while (= 1 (logand 1 (getvar "CMDACTIVE"))) (command))
+)
+
 (defun g6:pickDimOffsetPreview (eligible breakMap / done gr typ dat typed ref refMid refPerp vec off cand oldSegs)
   ;; Finish any ordinary command before grread consumes dimension-offset input.
-  (while (= 1 (logand 1 (getvar "CMDACTIVE"))) (command))
+  (g6:finishActiveCommand)
   (setq done nil off nil typed "" oldSegs '())
   (setq ref (g6:firstDimRef eligible breakMap)
         refMid (if ref (car ref) nil)
@@ -287,9 +294,16 @@
   )
 )
 
+(defun g6:previewSegListP (items)
+  (and items (listp (car items)) (listp (caar items)))
+)
+
 (defun g6:cleanupBreakPreview ()
   (if *g6-break-preview*
-    (g6:deleteEnts *g6-break-preview*)
+    (if (g6:previewSegListP *g6-break-preview*)
+      (g6:drawPreviewSegs *g6-break-preview* 0)
+      (g6:deleteEnts *g6-break-preview*)
+    )
   )
   (setq *g6-break-preview* nil)
 )
@@ -366,19 +380,48 @@
   )
 )
 
-(defun g6:updateBreakPreview (sampleEnt marker anchor gapW markerScale / ed p1 p2 lay)
-  (g6:cleanupBreakPreview)
+(defun g6:buildBreakPreviewSegs (sampleEnt gapW markerScale / ed p1 p2 mid ang nAng halfGap halfMark g1 g2 m1 m2 segs)
+  ;; Lightweight breaker preview: draw transient vectors instead of creating,
+  ;; rotating, scaling, and deleting real marker copies on every mouse move.
   (if (and sampleEnt (setq ed (entget sampleEnt)))
     (progn
       (setq p1 (cdr (assoc 10 ed))
-            p2 (cdr (assoc 11 ed))
-            lay (cdr (assoc 8 ed)))
-      (setq *g6-break-preview*
-        (g6:createMarkerPairAtEnds marker anchor p1 p2 gapW markerScale lay T))
-      (setq *g6-break-work* nil)
+            p2 (cdr (assoc 11 ed)))
+      (if (and p1 p2 (> gapW 0.0) (> markerScale 0.0))
+        (progn
+          (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
+                ang (angle p1 p2)
+                nAng (+ ang (/ pi 2.0))
+                halfGap (/ gapW 2.0)
+                ;; Give scale feedback without depending on the picked marker's
+                ;; entity type or issuing commands during cursor tracking.
+                halfMark (max 0.001 (/ markerScale 2.0))
+                g1 (polar mid (+ ang pi) halfGap)
+                g2 (polar mid ang halfGap)
+                m1 (polar mid (+ ang pi) halfGap)
+                m2 (polar mid ang halfGap)
+                segs (list (list g1 g2)))
+          (setq segs
+            (append segs
+              (list
+                (list (polar m1 nAng halfMark) (polar m1 (+ nAng pi) halfMark))
+                (list (polar m2 nAng halfMark) (polar m2 (+ nAng pi) halfMark))
+                (list (polar m1 ang halfMark) (polar m1 (+ ang pi) halfMark))
+                (list (polar m2 ang halfMark) (polar m2 (+ ang pi) halfMark)))))
+          segs
+        )
+      )
     )
   )
-  *g6-break-preview*
+)
+
+(defun g6:updateBreakPreview (sampleEnt marker anchor gapW markerScale / segs)
+  ;; Retained for compatibility with older call sites, but now produces only a
+  ;; transient grdraw preview and never creates database objects.
+  (g6:cleanupBreakPreview)
+  (setq segs (g6:buildBreakPreviewSegs sampleEnt gapW markerScale))
+  (g6:drawPreviewSegs segs 1)
+  (setq *g6-break-preview* segs)
 )
 
 (defun g6:pickBreakerMarker (/ picked marker selectPt anchor)
@@ -398,27 +441,45 @@
   )
 )
 
-(defun g6:pickBreakOneValue (msg sampleEnt marker anchor gapW markerScale mode / ed p1 p2 mid ang done val typed gr typ dat vec dotv)
+(defun g6:pickBreakOneValue (msg sampleEnt marker anchor gapW markerScale mode / ed p1 p2 mid ang done val typed gr typ dat vec dotv oldSegs newSegs lastDrawVal curGap curScale)
   (setq ed (entget sampleEnt)
-        p1 (cdr (assoc 10 ed))
-        p2 (cdr (assoc 11 ed))
-        mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
-        ang (angle p1 p2)
+        p1 (if ed (cdr (assoc 10 ed)) nil)
+        p2 (if ed (cdr (assoc 11 ed)) nil)
         val (if (= mode "GAP") gapW markerScale)
         typed ""
-        done nil)
-  (if (null (g6:updateBreakPreview sampleEnt marker anchor gapW markerScale))
+        done nil
+        oldSegs '()
+        lastDrawVal nil)
+  (if (and p1 p2)
+    (setq mid (mapcar '(lambda (a b) (/ (+ a b) 2.0)) p1 p2)
+          ang (angle p1 p2))
     (progn
-      (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
+      (prompt "\nUnable to preview breaker size; breaker creation canceled.")
       (setq val nil done T)
     )
   )
-  (if (not done) (prompt msg))
+  (if (not done)
+    (progn
+      ;; Finish any active ordinary command before grread consumes breaker input.
+      (g6:finishActiveCommand)
+      (prompt msg)
+      (setq oldSegs (g6:buildBreakPreviewSegs sampleEnt gapW markerScale))
+      (g6:drawPreviewSegs oldSegs 1)
+      (setq *g6-break-preview* oldSegs
+            lastDrawVal val)
+    )
+  )
   (while (not done)
-    (setq gr (grread T 13 0) typ (car gr) dat (cadr gr))
+    ;; Match the safer dimension-offset preview behavior: all-key mode consumes
+    ;; unsupported keys here instead of letting AutoCAD see them as commands.
+    (setq gr (grread T 15 0)
+          typ (car gr)
+          dat (cadr gr))
     (cond
       ((= typ 5)
-        (if (and dat (listp dat))
+        ;; Once numeric typing begins, mouse movement must not overwrite it.
+        ;; Movement resumes only after the typed buffer is cleared.
+        (if (and (= (strlen typed) 0) dat (listp dat))
           (progn
             (setq vec (g6:pt- dat mid))
             (if (= mode "GAP")
@@ -426,46 +487,86 @@
               (setq dotv (+ (* (car vec) (- (sin ang))) (* (cadr vec) (cos ang))))
             )
             (setq val (max 0.001 (* 2.0 (abs dotv))))
-            (if (= mode "GAP") (setq gapW val) (setq markerScale val))
-            (if (null (g6:updateBreakPreview sampleEnt marker anchor gapW markerScale))
+            (if (or (null lastDrawVal) (> (abs (- val lastDrawVal)) 1e-6))
               (progn
-                (progn
-          (g6:cleanupBreakWork)
-          (prompt "\nUnable to copy or transform the selected breaker marker; breaker creation canceled.")
-        )
-                (setq val nil done T)
+                (if (= mode "GAP")
+                  (setq curGap val curScale markerScale)
+                  (setq curGap gapW curScale val)
+                )
+                (g6:drawPreviewSegs oldSegs 0)
+                (setq newSegs (g6:buildBreakPreviewSegs sampleEnt curGap curScale))
+                (g6:drawPreviewSegs newSegs 1)
+                (setq oldSegs newSegs
+                      *g6-break-preview* oldSegs
+                      lastDrawVal val)
               )
             )
           )
         )
       )
-      ((= typ 3) (setq done T))
+      ((= typ 3)
+        (if (> (strlen typed) 0)
+          (setq val (max 0.001 (atof typed)))
+          (if (and dat (listp dat))
+            (progn
+              (setq vec (g6:pt- dat mid))
+              (if (= mode "GAP")
+                (setq dotv (+ (* (car vec) (cos ang)) (* (cadr vec) (sin ang))))
+                (setq dotv (+ (* (car vec) (- (sin ang))) (* (cadr vec) (cos ang))))
+              )
+              (setq val (max 0.001 (* 2.0 (abs dotv))))
+            )
+          )
+        )
+        (setq done T)
+      )
       ((= typ 2)
         (cond
-          ((= dat 13) (setq done T))
-          ((= dat 27) (setq val nil done T))
-          ((= dat 8)
-            (if (> (strlen typed) 0) (setq typed (substr typed 1 (1- (strlen typed)))))
+          ((= dat 27)
+            (setq val nil done T)
+          )
+          ((or (= dat 13) (= dat 32))
             (if (> (strlen typed) 0)
-              (progn
-                (setq val (max 0.001 (atof typed)))
-                (if (= mode "GAP") (setq gapW val) (setq markerScale val))
-                (if (null (g6:updateBreakPreview sampleEnt marker anchor gapW markerScale))
-                  (setq val nil done T)
-                )
-              )
+              (setq val (max 0.001 (atof typed)))
             )
+            (setq done T)
+          )
+          ((= dat 8)
+            (if (> (strlen typed) 0)
+              (setq typed (substr typed 1 (1- (strlen typed))))
+            )
+            (if (> (strlen typed) 0)
+              (setq val (max 0.001 (atof typed)))
+            )
+            (if (= mode "GAP")
+              (setq curGap val curScale markerScale)
+              (setq curGap gapW curScale val)
+            )
+            (g6:drawPreviewSegs oldSegs 0)
+            (setq newSegs (g6:buildBreakPreviewSegs sampleEnt curGap curScale))
+            (g6:drawPreviewSegs newSegs 1)
+            (setq oldSegs newSegs
+                  *g6-break-preview* oldSegs
+                  lastDrawVal val)
           )
           ((or (and (>= dat 48) (<= dat 57)) (= dat 46))
             (setq typed (strcat typed (chr dat))
                   val (max 0.001 (atof typed)))
-            (if (= mode "GAP") (setq gapW val) (setq markerScale val))
-            (if (null (g6:updateBreakPreview sampleEnt marker anchor gapW markerScale))
-              (setq val nil done T)
+            (if (= mode "GAP")
+              (setq curGap val curScale markerScale)
+              (setq curGap gapW curScale val)
             )
+            (g6:drawPreviewSegs oldSegs 0)
+            (setq newSegs (g6:buildBreakPreviewSegs sampleEnt curGap curScale))
+            (g6:drawPreviewSegs newSegs 1)
+            (setq oldSegs newSegs
+                  *g6-break-preview* oldSegs
+                  lastDrawVal val)
           )
+          ;; Unsupported keys are intentionally ignored/consumed.
         )
       )
+      ;; Unsupported grread event types are intentionally ignored/consumed.
     )
   )
   (g6:cleanupBreakPreview)

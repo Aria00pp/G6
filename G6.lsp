@@ -14,6 +14,24 @@
 (defun g6:deg->rad (d) (* pi (/ d 180.0)))
 (defun g6:rad->deg (r) (* 180.0 (/ r pi)))
 
+(defun g6:normalizeUserLength (x / n q r rounded)
+  (setq x (abs x)
+        n (fix x)
+        q (fix (/ n 5))
+        r (- n (* q 5)))
+  (cond
+    ((or (= r 0) (= r 1))
+     (setq rounded (* q 5.0)))
+    ((or (= r 3) (= r 4))
+     (setq rounded (* (1+ q) 5.0)))
+    ((= (rem q 2) 0)
+     (setq rounded (* q 5.0)))
+    (T
+     (setq rounded (* (1+ q) 5.0)))
+  )
+  (max 15.0 rounded)
+)
+
 (defun g6:fmtLen (v / prec s)
   (setq prec (getvar "LUPREC"))
   (if (equal v (fix v) 1e-8)
@@ -1281,7 +1299,7 @@
     (if (= lenStr "")
       (setq curLen (if lastLen lastLen 1.0))
       (progn
-        (setq tmp (abs (atof lenStr)))
+        (setq tmp (g6:normalizeUserLength (atof lenStr)))
         (setq curLen (* scaleFactor tmp))
       )
     )
@@ -1333,7 +1351,7 @@
                     (setq prevPt2 nil done T finishedInput T)
                   )
                   (progn
-                    (setq userLen (abs (atof lenStr)))
+                    (setq userLen (g6:normalizeUserLength (atof lenStr)))
                     (setq len (* scaleFactor userLen))
 
                     (if prevPt2 (grdraw pt prevPt2 0))
